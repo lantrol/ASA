@@ -1,63 +1,57 @@
-from ASA import SimulationASA, Transducer
-import numpy as np
-import torch
+import math
+import os
+import time
+
 import matplotlib.pyplot as plt
 import napari
-import time
-import os
+import numpy as np
+import torch
+
+from ASA import Orientation, SimulationASA, Transducer
 
 fr = 40e3
 c = 343.0
 
-# t = Transducer(16, 0.16, 0.009, [0, 0, 0])
-# matrix = t.to_complex_plane(0.16/128)
-
-# print(matrix)
-
-# plt.imshow(torch.real(matrix).detach().numpy(), vmin=0, vmax=1)
-# plt.show(block = True)
-
-
-sim = SimulationASA(fr, c, ds = 0.16/128)
-sim.add_transducer(
-    Transducer(8, 0.16, 0.005, [0, 0, 0])
-)
-sim.create_propagators()
-field = sim.calculate_volume()
-
-# plt.imshow(torch.abs(field[0, :, :]).detach().numpy())
-# plt.show(block=True)
-
-def trim_field(field):
-    final_dim = field.size()[0]
-    extra = field.size()[1] - final_dim
-
-    return field[:, extra//2:extra//2 + final_dim, extra//2:extra//2 + final_dim]
-
-field = trim_field(field)
-field += field.rot90(2, (0, 1)) # + field.rot90(1, (0, 2))
-
-viewer, layers = napari.imshow(torch.abs(field).rot90(0, (0, 1)).detach().numpy())
-napari.run()
-
-
-exit(-1)
-
-# -- Actual simulation --
-
-sim = SimulationASA(fr, c )
+sim = SimulationASA(fr, c, size=0.08, ds=0.08 / 64)
+sim.add_transducer(Transducer(16, 0.16, 0.005, [0, 0, 0], Orientation.Z))
+sim.add_transducer(Transducer(16, 0.16, 0.005, [0, 0, 0], Orientation.X))
+sim.add_transducer(Transducer(16, 0.16, 0.005, [0, 0, 0], Orientation.Y))
 sim.create_propagators()
 
-start = time.time()
 
-sim.add_transducer(16)
+size = 64
+sigma = size / 24  # controls spread (smaller = sharper sphere)
+
+# Create coordinate grid
+coords = torch.linspace(-1, 1, size)
+x, y, z = torch.meshgrid(coords, coords, coords, indexing="ij")
+
+# Squared distance from center
+r2 = x**2 + y**2 + z**2
+
+# Gaussian
+sample = torch.exp(-r2 / (2 * (sigma / size) ** 2)) * 10
+
+print(sample.mean())
+
+field = None
+for k in range(20):
+    field = sim.calculate_volume()
+
+    loss = (field.abs() - sample).abs().sum()
+    loss.backward()
+
+    print(loss.item())
+
+    with torch.no_grad():
+        for tr in sim.transducers:
+            tr.phases -= 0.001 * tr.phases.grad
+            tr.amps -= 0.001 * tr.amps.grad
+
+    for tr in sim.transducers:
+        tr.phases.grad = None
+        tr.amps.grad = None
+
 field = sim.calculate_volume()
-
-duration = time.time()-start
-print("Duration: ", duration)
-
-plt.imshow(torch.abs(field[0, :, :]).detach().numpy())
-plt.show(block=True)
-
-viewer, layers = napari.imshow(torch.abs(field).detach().numpy())
+viewer, layers = napari.imshow(torch.abs(field).rot90(-1, (0, 1)).detach().numpy())
 napari.run()
