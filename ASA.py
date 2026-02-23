@@ -7,19 +7,6 @@ import matplotlib.pyplot as plt
 import numpy as np
 import torch
 
-# Idea Dump:
-#  - Transducer:
-#    Will save a 2D array of Phases and Amps for each emitter
-#    Befor calculating, convert to complex field of amps with same
-#    resolution as volume slice (have to see how to do correctly)
-#
-#  - Propagator:
-#     Field of complex numbers codifying the distances
-#     Have to correctly set center and carefull with transducer positions.
-#     If transducers only orthogonal, dont need for precise coordinates
-#     (just flip matrixes befor adding to volume)
-#
-
 # Coordinate System:
 # - X: Horizontal axis
 # - Y: Depth axis
@@ -32,8 +19,31 @@ import torch
 
 class SimulationASA:
     # --- Parameters ---:
-    # fr: Frequency of emitters
-    # c: speed of sound
+    #   fr: Frequency of emitters
+    #   c: speed of sound
+    #   size: size of volume in meters
+    #   pos: position of volume in 3D space
+    #   ds: sice of each cell of the volume
+    #   device: which torch device to simulate in
+    #
+    # Inferred ->
+    #   dim: size in cells, (size / ds)
+    #   wavelen: (c / fr)
+    #   k: (2 * pi / wavelen)
+    #
+    # --- Transducer and Propagator coordinates ---
+    # Transducers are defined as an amp and phase tensors (t_mux, num_emitter, num_emitter).
+    # The have gradients enabled to allow optimizing them.
+    # Each iteration, the field is expanded to the simulation dim to allow
+    # correctly convoluting with FFT. (check to_complex_plane)
+    #
+    #
+    # The propagator is a (dim, dim, dim) tensor. Each transducer/t_mux has each own
+    # propagator.
+    # Propagators are always defined vertically respect to each transducer. Later, depending
+    # on orientation, the propagated volume is rotated and added to the total volume.
+    # Since Z is the vertical axis, its used to determine the distance from the volume.
+    #
 
     def __init__(
         self,
@@ -152,56 +162,60 @@ class SimulationASA:
         for transducer in self.transducers:
             total_mux += transducer.t_mux
 
-            for t in range(transducer.t_mux):
-                emitter = transducer.to_complex_plane(self.ds, t)
+            emitter = transducer.to_complex_plane(self.ds, -1)
 
-                # plt.imshow(torch.real(emitter).detach().numpy())
-                # plt.show(block=True)
+            # plt.imshow(torch.real(emitter[0, :, :]).cpu().detach().numpy())
+            # plt.show(block=True)
 
-                propagator = self.propagator[0]
+            (x, y, z) = emitter.size()
+            emitter = emitter.reshape(x, 1, y, z)
 
-                min_side_size = (
-                    propagator.shape[-1]
-                    + transducer.to_complex_plane(self.ds, 0).shape[-1]
-                    - 1
-                )
-                pad_to_size = 2 ** np.ceil(np.log2(min_side_size))
+            propagator = self.propagator[0]
 
-                pad_func = torch.nn.functional.pad
+            min_side_size = (
+                propagator.shape[-1]
+                + transducer.to_complex_plane(self.ds, 0).shape[-1]
+                - 1
+            )
+            pad_to_size = 2 ** np.ceil(np.log2(min_side_size))
 
-                prop_pad = int(np.ceil((pad_to_size - propagator.shape[-1]) / 2))
-                padded_propagator = pad_func(
-                    propagator, (prop_pad, prop_pad, prop_pad, prop_pad, 0, 0)
-                )
+            pad_func = torch.nn.functional.pad
 
-                emitt_pad = int(np.ceil((pad_to_size - emitter.shape[-1]) / 2))
-                padded_emitter = pad_func(
-                    emitter, (emitt_pad, emitt_pad, emitt_pad, emitt_pad)
-                )
+            prop_pad = int(np.ceil((pad_to_size - propagator.shape[-1]) / 2))
+            padded_propagator = pad_func(
+                propagator, (prop_pad, prop_pad, prop_pad, prop_pad, 0, 0)
+            )
 
-                fft_emitter = torch.fft.fft2(torch.fft.ifftshift(padded_emitter))
-                fft_prop = torch.fft.fft2(torch.fft.ifftshift(padded_propagator))
+            emitt_pad = int(np.ceil((pad_to_size - emitter.shape[-1]) / 2))
+            padded_emitter = pad_func(
+                emitter, (emitt_pad, emitt_pad, emitt_pad, emitt_pad)
+            )
 
-                convolved = fft_emitter * fft_prop
+            fft_emitter = torch.fft.fft2(torch.fft.ifftshift(padded_emitter))
+            fft_prop = torch.fft.fft2(torch.fft.ifftshift(padded_propagator))
 
-                field = torch.fft.fftshift(torch.fft.ifft2(convolved))
+            convolved = fft_emitter * fft_prop
 
-                # Trim the field
-                extra = field.size()[1] - self.dim
-                field = field[
-                    :,
-                    extra // 2 : extra // 2 + self.dim,
-                    extra // 2 : extra // 2 + self.dim,
-                ]
+            field = torch.fft.fftshift(torch.fft.ifft2(convolved))
 
-                if transducer.orientation == Orientation.Z:
-                    volume += field
-                elif transducer.orientation == Orientation.Z_1:
-                    volume += field.rot90(2, (0, 1))
-                elif transducer.orientation == Orientation.Y:
-                    volume += field.rot90(-1, (0, 1))
-                elif transducer.orientation == Orientation.X:
-                    volume += field.rot90(-1, (0, 2))
+            field = field.sum(dim=0)
+
+            # Trim the field
+            extra = field.size()[1] - self.dim
+            field = field[
+                :,
+                extra // 2 : extra // 2 + self.dim,
+                extra // 2 : extra // 2 + self.dim,
+            ]
+
+            if transducer.orientation == Orientation.Z:
+                volume += field
+            elif transducer.orientation == Orientation.Z_1:
+                volume += field.rot90(2, (0, 1))
+            elif transducer.orientation == Orientation.Y:
+                volume += field.rot90(-1, (0, 1))
+            elif transducer.orientation == Orientation.X:
+                volume += field.rot90(-1, (0, 2))
 
         # print("FFTs Finished!")
         return volume.abs() / total_mux
@@ -226,8 +240,8 @@ class Transducer:
         t_mux: int = 1,
         device="cpu",
     ):
-        self.phases: list[torch.Tensor]
-        self.amps: list[torch.Tensor]
+        self.phases: torch.Tensor
+        self.amps: torch.Tensor
         self.emitter_size: float = emitter_size
         self.array_size: float = array_size
         self.pos: torch.Tensor = torch.tensor(pos, dtype=torch.float32, device=device)
@@ -235,52 +249,54 @@ class Transducer:
         self.t_mux: int = t_mux
         self.device = device
 
-        self.phases = [
-            torch.rand(
-                (emitters_num, emitters_num),
-                dtype=torch.float32,
-                requires_grad=True,
-                device=self.device,
-            )
-            for i in range(t_mux)
-        ]
-        self.amps = [
-            torch.rand(
-                (emitters_num, emitters_num),
-                dtype=torch.float32,
-                requires_grad=True,
-                device=self.device,
-            )
-            for i in range(t_mux)
-        ]
-
-    def to_complex_plane(self, ds: float, t_mux: int):
-        start = time.time()
-        # Input:
-        # - ds: Sice of each cell. Defined by the simulation volume
-        target_size = round(self.array_size / ds)
-        # print(target_size)
-
-        transducer = torch.zeros(
-            (target_size, target_size), dtype=torch.complex64, device=self.device
+        self.phases = torch.zeros(
+            (t_mux, emitters_num, emitters_num),
+            dtype=torch.float32,
+            requires_grad=True,
+            device=self.device,
         )
 
-        cells_per_emitter = np.round(self.emitter_size / ds).astype(np.int32)
-        gap_between = (
-            target_size - cells_per_emitter * self.phases[t_mux].size()[0]
-        ) // self.phases[t_mux].size()[0]
+        self.amps = torch.ones(
+            (t_mux, emitters_num, emitters_num),
+            dtype=torch.float32,
+            requires_grad=True,
+            device=self.device,
+        )
 
-        # print(cells_per_emitter, gap_between)
+    def to_complex_plane(self, ds: float, t_mux: int):
+        target_size = round(self.array_size / ds)
 
-        for y in range(self.phases[t_mux].size()[0]):
-            for x in range(self.phases[t_mux].size()[0]):
-                pos_x = int(gap_between // 2 + x * (cells_per_emitter + gap_between))
-                pos_y = int(gap_between // 2 + y * (cells_per_emitter + gap_between))
+        cells_per_emitter = int(np.round(self.emitter_size / ds))
+        n_y = self.phases.size(1)
+        n_x = self.phases.size(2)
 
-                transducer[
-                    pos_y : pos_y + cells_per_emitter, pos_x : pos_x + cells_per_emitter
-                ] += self.amps[t_mux][y, x] * torch.exp(1j * self.phases[t_mux][y, x])
+        gap_between = (target_size - cells_per_emitter * n_y) // n_y
 
-        # print(f"time took: {time.time() - start}")
+        # (t_mux, ny, nx)
+        field = self.amps * torch.exp(1j * self.phases)  # complex64
+
+        # Insert gaps using Kronecker trick
+        if gap_between > 0:
+            gap_kernel = torch.zeros(
+                (cells_per_emitter + gap_between, cells_per_emitter + gap_between),
+                dtype=torch.complex64,
+                device=self.device,
+            )
+            gap_kernel[:cells_per_emitter, :cells_per_emitter] = 1
+
+            field = torch.kron(field, gap_kernel)
+
+        # Center padding
+        pad_total = target_size - field.shape[-1]
+        pad_left = pad_total // 2
+        pad_right = pad_total - pad_left
+
+        transducer = torch.nn.functional.pad(
+            field, (pad_left, pad_right, pad_left, pad_right)
+        )
+
+        transducer = torch.roll(
+            transducer, (gap_between // 2, gap_between // 2), dims=(1, 2)
+        )
 
         return transducer

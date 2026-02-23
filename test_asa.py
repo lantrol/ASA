@@ -18,18 +18,15 @@ device = "cuda"
 
 sim = SimulationASA(fr, c, size=0.16, ds=0.16 / 25, device=device)
 
-# sim.add_transducer(
-#     Transducer(16, 0.16, 0.008, [0, 0, 0], Orientation.X, t_mux=1, device=device)
-# )
 
 sim.add_transducer(
-    Transducer(16, 0.16, 0.008, [-0.12, 0, 0], Orientation.X, t_mux=16, device=device)
+    Transducer(16, 0.16, 0.008, [-0.12, 0, 0], Orientation.X, t_mux=1, device=device)
 )
 sim.add_transducer(
-    Transducer(16, 0.16, 0.008, [-0.12, 0, 0], Orientation.Y, t_mux=16, device=device)
+    Transducer(16, 0.16, 0.008, [-0.12, 0, 0], Orientation.Y, t_mux=1, device=device)
 )
 sim.add_transducer(
-    Transducer(16, 0.16, 0.008, [-0.12, 0, 0], Orientation.Z, t_mux=16, device=device)
+    Transducer(16, 0.16, 0.008, [-0.12, 0, 0], Orientation.Z, t_mux=1, device=device)
 )
 
 sim.create_propagators()
@@ -51,15 +48,16 @@ sample = torch.exp(-r2 / (2 * (sigma / size) ** 2)).to(device) * 2
 # print(sample.max())
 
 
+start = time.time()
+
 params = []
-
 for tr in sim.transducers:
-    for t in range(tr.t_mux):
-        params.append(tr.phases[t])
-        params.append(tr.amps[t])
+    params.append(tr.phases)
+    params.append(tr.amps)
 
+iters = 300
 optimizer = torch.optim.AdamW(params, lr=0.1)
-for k in range(300):
+for k in range(iters):
     field = sim.calculate_volume()
     field = field.abs()  # / torch.abs(field).max()
 
@@ -71,23 +69,10 @@ for k in range(300):
 
     print(f"{loss.item():.2f}")
 
-    # with torch.no_grad():
-    #     for tr in sim.transducers:
-    #         for t in range(tr.t_mux):
-    #             tr.phases[t] -= 0.00000001 * tr.phases[t].grad
-    #             tr.amps[t] -= 0.00000001 * tr.amps[t].grad
-
-    # for tr in sim.transducers:
-    #     for t in range(tr.t_mux):
-    #         tr.phases[t].grad = None
-    #         tr.amps[t].grad = None
+duration = time.time() - start
+print(f"Total optimization time for {iters} iterations: ", duration)
 
 field = sim.calculate_volume()
-
-print(torch.abs(field).mean())
-
-field_norm = field.abs() / torch.abs(field).max()
-loss = (field_norm - sample).abs()
 
 viewer, layers = napari.imshow(
     torch.abs(field).rot90(-1, (0, 1)).cpu().detach().numpy()
