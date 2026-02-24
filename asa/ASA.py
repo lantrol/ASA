@@ -17,34 +17,33 @@ import torch
 #   to be in the last dimensions
 
 
+# --- Parameters ---:
+#   fr: Frequency of emitters
+#   c: speed of sound
+#   size: size of volume in meters
+#   pos: position of volume in 3D space
+#   ds: sice of each cell of the volume
+#   device: which torch device to simulate in
+#
+# Inferred ->
+#   dim: size in cells, (size / ds)
+#   wavelen: (c / fr)
+#   k: (2 * pi / wavelen)
+#
+# --- Transducer and Propagator coordinates ---
+# Transducers are defined as an amp and phase tensors (t_mux, num_emitter, num_emitter).
+# The have gradients enabled to allow optimizing them.
+# Each iteration, the field is expanded to the simulation dim to allow
+# correctly convoluting with FFT. (check to_complex_plane)
+#
+#
+# The propagator is a (dim, dim, dim) tensor. Each transducer/t_mux has each own
+# propagator.
+# Propagators are always defined vertically respect to each transducer. Later, depending
+# on orientation, the propagated volume is rotated and added to the total volume.
+# Since Z is the vertical axis, its used to determine the distance from the volume.
+#
 class SimulationASA:
-    # --- Parameters ---:
-    #   fr: Frequency of emitters
-    #   c: speed of sound
-    #   size: size of volume in meters
-    #   pos: position of volume in 3D space
-    #   ds: sice of each cell of the volume
-    #   device: which torch device to simulate in
-    #
-    # Inferred ->
-    #   dim: size in cells, (size / ds)
-    #   wavelen: (c / fr)
-    #   k: (2 * pi / wavelen)
-    #
-    # --- Transducer and Propagator coordinates ---
-    # Transducers are defined as an amp and phase tensors (t_mux, num_emitter, num_emitter).
-    # The have gradients enabled to allow optimizing them.
-    # Each iteration, the field is expanded to the simulation dim to allow
-    # correctly convoluting with FFT. (check to_complex_plane)
-    #
-    #
-    # The propagator is a (dim, dim, dim) tensor. Each transducer/t_mux has each own
-    # propagator.
-    # Propagators are always defined vertically respect to each transducer. Later, depending
-    # on orientation, the propagated volume is rotated and added to the total volume.
-    # Since Z is the vertical axis, its used to determine the distance from the volume.
-    #
-
     def __init__(
         self,
         fr,
@@ -71,6 +70,9 @@ class SimulationASA:
         self.propagator: list[torch.Tensor] = []  # Propagator matrix
 
     def add_transducer(self, transducer):
+        same_axis = False
+        for tr in self.transducers:
+            same_axis = same_axis or tr.orientation == transducer.orientation
         self.transducers.append(transducer)
 
     def emmiter_field_from_phases(self, emitter_dim: int, phases: torch.Tensor):
@@ -155,7 +157,9 @@ class SimulationASA:
     def calculate_volume(self):
         # For now assume there is only one for testing :P
         volume = torch.zeros(
-            (self.dim, self.dim, self.dim), dtype=torch.complex64, device=self.device
+            (self.transducers[0].t_mux, self.dim, self.dim, self.dim),
+            dtype=torch.complex64,
+            device=self.device,
         )
 
         total_mux = 0
@@ -163,9 +167,6 @@ class SimulationASA:
             total_mux += transducer.t_mux
 
             emitter = transducer.to_complex_plane(self.ds, -1)
-
-            # plt.imshow(torch.real(emitter[0, :, :]).cpu().detach().numpy())
-            # plt.show(block=True)
 
             (x, y, z) = emitter.size()
             emitter = emitter.reshape(x, 1, y, z)
@@ -198,27 +199,29 @@ class SimulationASA:
 
             field = torch.fft.fftshift(torch.fft.ifft2(convolved))
 
-            field = field.sum(dim=0)
-
             # Trim the field
-            extra = field.size()[1] - self.dim
+            extra = field.size()[-1] - self.dim
             field = field[
+                :,
                 :,
                 extra // 2 : extra // 2 + self.dim,
                 extra // 2 : extra // 2 + self.dim,
             ]
 
             if transducer.orientation == Orientation.Z:
+                # for mux in range(transducer.t_mux):
                 volume += field
             elif transducer.orientation == Orientation.Z_1:
-                volume += field.rot90(2, (0, 1))
+                # for mux in range(transducer.t_mux):
+                volume += field.rot90(2, (1, 2))
             elif transducer.orientation == Orientation.Y:
-                volume += field.rot90(-1, (0, 1))
+                # for mux in range(transducer.t_mux):
+                volume += field.rot90(-1, (1, 2))
             elif transducer.orientation == Orientation.X:
-                volume += field.rot90(-1, (0, 2))
+                # for mux in range(transducer.t_mux):
+                volume += field.rot90(-1, (1, 3))
 
-        # print("FFTs Finished!")
-        return volume.abs() / total_mux
+        return volume.abs().sum(dim=0) / total_mux
 
 
 class Orientation(Enum):
@@ -228,7 +231,6 @@ class Orientation(Enum):
     Z_1 = 4
 
 
-# WIP
 class Transducer:
     def __init__(
         self,
@@ -249,14 +251,14 @@ class Transducer:
         self.t_mux: int = t_mux
         self.device = device
 
-        self.phases = torch.zeros(
+        self.phases = torch.rand(
             (t_mux, emitters_num, emitters_num),
             dtype=torch.float32,
             requires_grad=True,
             device=self.device,
         )
 
-        self.amps = torch.ones(
+        self.amps = torch.rand(
             (t_mux, emitters_num, emitters_num),
             dtype=torch.float32,
             requires_grad=True,
@@ -268,7 +270,6 @@ class Transducer:
 
         cells_per_emitter = int(np.round(self.emitter_size / ds))
         n_y = self.phases.size(1)
-        n_x = self.phases.size(2)
 
         gap_between = (target_size - cells_per_emitter * n_y) // n_y
 
