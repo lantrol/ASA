@@ -6,6 +6,7 @@ from typing import List
 import matplotlib.pyplot as plt
 import numpy as np
 import torch
+import torch.fft as fft
 import torch.nn.functional as F
 from torch.fx.node import Target
 
@@ -45,7 +46,7 @@ from torch.fx.node import Target
 # on orientation, the propagated volume is rotated and added to the total volume.
 # Since Z is the vertical axis, its used to determine the distance from the volume.
 #
-class SimulationASA:
+class Simulation_ASA_Spectrum:
     def __init__(
         self,
         fr,
@@ -67,14 +68,16 @@ class SimulationASA:
         self.device = device
 
         self.transducers: list[
-            Transducer
+            Transducer_Spectrum
         ] = []  # Array of num_emitter x num_emitter phases
-        self.propagator: list[torch.Tensor] = []  # Propagator matrix
+        self.propagators: list[torch.Tensor] = []  # Propagator matrix
 
     def add_transducer(self, transducer):
         same_axis = False
         for tr in self.transducers:
             same_axis = same_axis or tr.orientation == transducer.orientation
+
+        assert not same_axis, "Included diffirent transducers on same axis!"
         self.transducers.append(transducer)
 
     def emmiter_field_from_phases(self, emitter_dim: int, phases: torch.Tensor):
@@ -103,58 +106,91 @@ class SimulationASA:
 
     def create_propagators(self):
         for transducer in self.transducers:
-            propagator = torch.zeros(
-                (self.dim, self.dim, self.dim),
-                dtype=torch.complex64,
-                device=self.device,
-            )
+            transducer.init_transducer(self.ds)
+            min_dist = abs(transducer.pos[0])
 
-            # Create the coordinate grid
-            z_coords = (
-                torch.arange(-self.dim // 2, self.dim // 2, device=self.device)
-                .view(1, 1, -1)
-                .float()
-                * self.ds
-                + self.pos[0]
-            )
-            y_coords = (
-                torch.arange(-self.dim // 2, self.dim // 2, device=self.device)
-                .view(1, -1, 1)
-                .float()
-                * self.ds
-                + self.pos[1]
-            )
-            x_coords = (
-                torch.arange(-self.dim // 2, self.dim // 2, device=self.device)
-                .view(-1, 1, 1)
-                .float()
-                * self.ds
-                + self.pos[2]
-            )
+            fx = torch.fft.fftfreq(self.dim * 2, d=self.ds, device=self.device)
+            fy = torch.fft.fftfreq(self.dim * 2, d=self.ds, device=self.device)
 
-            # Expand dimensions for broadcasting to match the propagator shape [dim, dim, dim]
-            z_coords = z_coords.expand(self.dim, self.dim, -1)
-            y_coords = y_coords.expand(self.dim, -1, self.dim)
-            x_coords = x_coords.expand(-1, self.dim, self.dim)
+            kx = 2 * math.pi * fx
+            ky = 2 * math.pi * fy
+            kx, ky = torch.meshgrid(kx, ky, indexing="ij")
 
-            cell_pos = torch.stack(
-                [
-                    x_coords,
-                    y_coords,
-                    z_coords,
-                ],
-                dim=0,
-            )
+            kz_squared = self.k**2 - kx**2 - ky**2
+            kz = torch.sqrt(kz_squared + 0j)
 
-            # Ensure transducer.pos broadcasts to (3, 1, 1, 1)
-            transducer_pos_broad = transducer.pos.unsqueeze(1).unsqueeze(1).unsqueeze(1)
+            dists = torch.linspace(
+                min_dist, min_dist + self.ds * self.dim, self.dim, device=self.device
+            ).view(-1, 1, 1)
 
-            between = cell_pos - transducer_pos_broad
-            dist = torch.norm(between, dim=0)
+            # Propagation factor
+            propagator = torch.exp(1j * kz * (dists + 0j))
 
-            propagator = (1.0 / (dist + 1e-9)) * torch.exp(1j * (self.k * dist))
+            # padded_emitter = pad_func(U0, (pad, pad, pad, pad))
 
-            self.propagator.append(propagator)
+            self.propagators.append(propagator)
+
+    def calculate_volume_spectrum(self):
+        volume = torch.zeros(
+            (self.transducers[0].t_mux, self.dim, self.dim, self.dim),
+            dtype=torch.complex64,
+            device=self.device,
+        )
+
+        total_mux = self.transducers[0].t_mux
+        for idx, tr in enumerate(self.transducers):
+            emitter_field = tr.rounded_emitters(self.ds)
+            (x, y, z) = emitter_field.size()
+            emitter_field = emitter_field.reshape(x, 1, y, z)
+
+            # print(tr.mask.shape)
+
+            # plt.imshow(tr.mask.cpu().detach().numpy())
+            # plt.show(block=True)
+
+            # plt.imshow(emitter_field[0, 0, :, :].abs().cpu().detach().numpy())
+            # plt.show(block=True)
+
+            # print(emitter_field.shape)
+
+            propagator = self.propagators[idx]
+
+            # plt.imshow(propagator[0, :, :].abs().cpu().detach().numpy())
+            # plt.show(block=True)
+
+            pad = emitter_field.shape[-1] // 2
+            padded_emitter = F.pad(emitter_field, (pad, pad, pad, pad))
+
+            # print(padded_emitter.shape)
+
+            U0_fft = fft.fft2(padded_emitter)
+            Uz_fft = U0_fft * propagator
+
+            Uz = fft.ifft2(Uz_fft)
+
+            # Trim the field
+            extra = Uz.size()[-1] - self.dim
+            Uz = Uz[
+                :,
+                :,
+                extra // 2 : extra // 2 + self.dim,
+                extra // 2 : extra // 2 + self.dim,
+            ]
+
+            if tr.orientation == Orientation.Z:
+                # for mux in range(transducer.t_mux):
+                volume += Uz
+            elif tr.orientation == Orientation.Z_1:
+                # for mux in range(transducer.t_mux):
+                volume += Uz.rot90(2, (1, 2))
+            elif tr.orientation == Orientation.Y:
+                # for mux in range(transducer.t_mux):
+                volume += Uz.rot90(-1, (1, 2))
+            elif tr.orientation == Orientation.X:
+                # for mux in range(transducer.t_mux):
+                volume += Uz.rot90(-1, (1, 3))
+
+        return volume.abs().sum(dim=0) / total_mux
 
     def calculate_volume(self):
         # For now assume there is only one for testing :P
@@ -177,7 +213,7 @@ class SimulationASA:
             (x, y, z) = emitter.size()
             emitter = emitter.reshape(x, 1, y, z)
 
-            propagator = self.propagator[idx]
+            propagator = self.propagators[idx]
             idx += 1
 
             # plt.imshow(propagator[0, :, :].abs().cpu().detach().numpy())
@@ -237,13 +273,12 @@ class Orientation(Enum):
     Z_1 = 4
 
 
-class Transducer:
+class Transducer_Spectrum:
     def __init__(
         self,
         emitters_num: int,
         array_size: float,
         emitter_size: float,
-        ds: float,
         pos: list,
         orientation: Orientation = Orientation.Z,
         t_mux: int = 1,
@@ -253,7 +288,6 @@ class Transducer:
         self.amps: torch.Tensor
         self.emitter_size: float = emitter_size
         self.array_size: float = array_size
-        self.ds = ds
         self.pos: torch.Tensor = torch.tensor(pos, dtype=torch.float32, device=device)
         self.orientation: Orientation = orientation
         self.t_mux: int = t_mux
@@ -278,30 +312,33 @@ class Transducer:
 
         self.mask: torch.Tensor = None
 
-        target_size = round(self.array_size / self.ds)
+    def init_transducer(self, ds: float):
+        # This creates a mask that will be used later when creating the complex plane
+        # Made separately and saved to speed up execution a bit
+
+        target_size = round(self.array_size / ds)
 
         gap_between = self.array_size / self.phases.shape[-1]
 
-        if self.mask == None:
-            dim_range_x = torch.arange(
-                0, target_size, dtype=torch.float32, device=self.device
-            ).view((1, -1))
-            dim_range_y = torch.arange(
-                0, target_size, dtype=torch.float32, device=self.device
-            ).view((-1, 1))
+        dim_range_x = torch.arange(
+            0, target_size, dtype=torch.float32, device=self.device
+        ).view((1, -1))
+        dim_range_y = torch.arange(
+            0, target_size, dtype=torch.float32, device=self.device
+        ).view((-1, 1))
 
-            positions = torch.stack(
-                [
-                    dim_range_x.expand((target_size, -1)),
-                    dim_range_y.expand((-1, target_size)),
-                ],
-                dim=0,
-            )
+        positions = torch.stack(
+            [
+                dim_range_x.expand((target_size, -1)),
+                dim_range_y.expand((-1, target_size)),
+            ],
+            dim=0,
+        )
 
-            positions = ((positions * ds) % gap_between) - gap_between / 2
-            dists = torch.sqrt((positions**2).sum(dim=0))
+        positions = ((positions * ds) % gap_between) - gap_between / 2
+        dists = torch.sqrt((positions**2).sum(dim=0))
 
-            self.mask = dists <= self.emitter_size / 2
+        self.mask = dists <= self.emitter_size / 2
 
     def to_complex_plane(self, ds: float):
         target_size = round(self.array_size / ds)
@@ -351,6 +388,10 @@ class Transducer:
             * self.mask
         )
 
-        # complex_field[:, self.mask] = 0 + 0j
-
         return complex_field
+
+
+def parse_file(path: str = "emitter_vals/phases.txt"):
+    data = np.loadtxt(path)
+    print(data)
+    return data
