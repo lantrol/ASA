@@ -8,43 +8,11 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 
-# Coordinate System:
-# - X: Horizontal axis
-# - Y: Depth axis
-# - Z: Vertical axis
-#
-# WARNING: Volume indexes are later defined as [Z, Y, X]
-# - This is since the FFT convolution requires the paralel plane
-#   to be in the last dimensions
+# WIP:
+# Trying to see if something similar to ASA Convolution can be used for bruteforce method
 
 
-# --- Parameters ---:
-#   fr: Frequency of emitters
-#   c: speed of sound
-#   size: size of volume in meters
-#   pos: position of volume in 3D space
-#   ds: sice of each cell of the volume
-#   device: which torch device to simulate in
-#
-# Inferred ->
-#   dim: size in cells, (size / ds)
-#   wavelen: (c / fr)
-#   k: (2 * pi / wavelen)
-#
-# --- Transducer and Propagator coordinates ---
-# Transducers are defined as an amp and phase tensors (t_mux, num_emitter, num_emitter).
-# The have gradients enabled to allow optimizing them.
-# Each iteration, the field is expanded to the simulation dim to allow
-# correctly convoluting with FFT. (check to_complex_plane)
-#
-#
-# The propagator is a (dim, dim, dim) tensor. Each transducer/t_mux has each own
-# propagator.
-# Propagators are always defined vertically respect to each transducer. Later, depending
-# on orientation, the propagated volume is rotated and added to the total volume.
-# Since Z is the vertical axis, its used to determine the distance from the volume.
-#
-class SimulationASA:
+class Simulation_Bruteforce:
     def __init__(
         self,
         fr,
@@ -66,7 +34,7 @@ class SimulationASA:
         self.device = device
 
         self.transducers: list[
-            Transducer
+            Transducer_Bruteforce
         ] = []  # Array of num_emitter x num_emitter phases
         self.propagators: list[torch.Tensor] = []  # Propagator matrix
 
@@ -84,28 +52,29 @@ class SimulationASA:
             if len(self.propagators) > 0:
                 continue
 
+            # TEST: Propagator of needed size from start
             propagator = torch.zeros(
-                (self.dim, self.dim, self.dim),
+                (self.dim, self.dim * 2, self.dim * 2),
                 dtype=torch.complex64,
                 device=self.device,
             )
 
             # Create the coordinate grid
-            z_coords = (
-                torch.arange(-self.dim // 2, self.dim // 2, device=self.device)
+            x_coords = (
+                torch.arange(-self.dim, self.dim, device=self.device)
                 .view(1, 1, -1)
                 .float()
                 * self.ds
                 + self.pos[0]
             )
             y_coords = (
-                torch.arange(-self.dim // 2, self.dim // 2, device=self.device)
+                torch.arange(-self.dim, self.dim, device=self.device)
                 .view(1, -1, 1)
                 .float()
                 * self.ds
                 + self.pos[1]
             )
-            x_coords = (
+            z_coords = (
                 torch.arange(-self.dim // 2, self.dim // 2, device=self.device)
                 .view(-1, 1, 1)
                 .float()
@@ -114,15 +83,15 @@ class SimulationASA:
             )
 
             # Expand dimensions for broadcasting to match the propagator shape [dim, dim, dim]
-            z_coords = z_coords.expand(self.dim, self.dim, -1)
-            y_coords = y_coords.expand(self.dim, -1, self.dim)
-            x_coords = x_coords.expand(-1, self.dim, self.dim)
+            x_coords = x_coords.expand(self.dim, self.dim * 2, -1)
+            y_coords = y_coords.expand(self.dim, -1, self.dim * 2)
+            z_coords = z_coords.expand(-1, self.dim * 2, self.dim * 2)
 
             cell_pos = torch.stack(
                 [
-                    x_coords,
-                    y_coords,
                     z_coords,
+                    y_coords,
+                    x_coords,
                 ],
                 dim=0,
             )
@@ -163,21 +132,26 @@ class SimulationASA:
             # plt.imshow(propagator[0, :, :].abs().cpu().detach().numpy())
             # plt.show(block=True)
 
-            min_side_size = propagator.shape[-1] + emitter.shape[-1] - 1
-            pad_to_size = 2 ** np.ceil(np.log2(min_side_size))
+            # TEST: Only pad emitter, propagator comes in needed size
+            # min_side_size = propagator.shape[-1] + emitter.shape[-1] - 1
+            # pad_to_size = 2 ** np.ceil(np.log2(min_side_size))
 
-            prop_pad = int(np.ceil((pad_to_size - propagator.shape[-1]) / 2))
-            padded_propagator = F.pad(
-                propagator, (prop_pad, prop_pad, prop_pad, prop_pad, 0, 0)
-            )
+            # prop_pad = int(np.ceil((pad_to_size - propagator.shape[-1]) / 2))
+            # padded_propagator = F.pad(
+            #     propagator, (prop_pad, prop_pad, prop_pad, prop_pad, 0, 0)
+            # )
 
-            emitt_pad = int(np.ceil((pad_to_size - emitter.shape[-1]) / 2))
+            # emitt_pad = int(np.ceil((pad_to_size - emitter.shape[-1]) / 2))
+            # padded_emitter = F.pad(
+            #     emitter, (emitt_pad, emitt_pad, emitt_pad, emitt_pad)
+            # )
+
             padded_emitter = F.pad(
-                emitter, (emitt_pad, emitt_pad, emitt_pad, emitt_pad)
+                emitter, (self.dim // 2, self.dim // 2, self.dim // 2, self.dim // 2)
             )
 
             fft_emitter = torch.fft.fft2(torch.fft.ifftshift(padded_emitter))
-            fft_prop = torch.fft.fft2(torch.fft.ifftshift(padded_propagator))
+            fft_prop = torch.fft.fft2(torch.fft.ifftshift(propagator))
 
             convolved = fft_emitter * fft_prop
 
@@ -192,37 +166,37 @@ class SimulationASA:
                 extra // 2 : extra // 2 + self.dim,
             ]
 
-            if transducer.orientation == Orientation.Z:
+            if transducer.orientation == Orientation_Bruteforce.Z:
                 # for mux in range(transducer.t_mux):
                 volume += field
-            elif transducer.orientation == Orientation.Z_1:
+            elif transducer.orientation == Orientation_Bruteforce.Z_1:
                 # for mux in range(transducer.t_mux):
                 volume += field.rot90(2, (1, 2))
-            elif transducer.orientation == Orientation.Y:
+            elif transducer.orientation == Orientation_Bruteforce.Y:
                 # for mux in range(transducer.t_mux):
                 volume += field.rot90(-1, (1, 2))
-            elif transducer.orientation == Orientation.X:
+            elif transducer.orientation == Orientation_Bruteforce.X:
                 # for mux in range(transducer.t_mux):
                 volume += field.rot90(-1, (1, 3))
 
         return volume.abs().sum(dim=0) / total_mux
 
 
-class Orientation(Enum):
+class Orientation_Bruteforce(Enum):
     X = 1
     Y = 2
     Z = 3
     Z_1 = 4
 
 
-class Transducer:
+class Transducer_Bruteforce:
     def __init__(
         self,
         emitters_num: int,
         array_size: float,
         emitter_size: float,
         pos: list,
-        orientation: Orientation = Orientation.Z,
+        orientation: Orientation_Bruteforce = Orientation_Bruteforce.Z,
         t_mux: int = 1,
         device="cpu",
     ):
@@ -231,7 +205,7 @@ class Transducer:
         self.emitter_size: float = emitter_size
         self.array_size: float = array_size
         self.pos: torch.Tensor = torch.tensor(pos, dtype=torch.float32, device=device)
-        self.orientation: Orientation = orientation
+        self.orientation: Orientation_Bruteforce = orientation
         self.t_mux: int = t_mux
         self.device = device
 
@@ -284,6 +258,9 @@ class Transducer:
         dists = torch.sqrt((positions**2).sum(dim=0))
 
         self.mask = dists <= self.emitter_size / 2
+
+        # roll_size = int(round((gap_between / 2) / ds))
+        # self.mask = torch.roll(self.mask, (-roll_size, -roll_size), (0, 1))
 
     def to_complex_plane(self, ds: float):
         target_size = round(self.array_size / ds)

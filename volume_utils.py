@@ -77,6 +77,51 @@ def create_donut(dim, r, R):
     return volume
 
 
+def create_donut_rot(dim, r, R, angles=(0, 0, 0)):
+    volume = torch.zeros((dim, dim, dim), dtype=torch.float32)
+
+    # Create coordinate grid
+    lin = torch.arange(-dim // 2, dim // 2, dtype=torch.float32)
+    x, y, z = torch.meshgrid(lin, lin, lin, indexing="ij")
+
+    # Convert degrees to radians
+    rx, ry, rz = [math.radians(a) for a in angles]
+
+    # Rotation matrices
+    Rx = torch.tensor(
+        [[1, 0, 0], [0, math.cos(rx), -math.sin(rx)], [0, math.sin(rx), math.cos(rx)]],
+        dtype=torch.float32,
+    )
+
+    Ry = torch.tensor(
+        [[math.cos(ry), 0, math.sin(ry)], [0, 1, 0], [-math.sin(ry), 0, math.cos(ry)]],
+        dtype=torch.float32,
+    )
+
+    Rz = torch.tensor(
+        [[math.cos(rz), -math.sin(rz), 0], [math.sin(rz), math.cos(rz), 0], [0, 0, 1]],
+        dtype=torch.float32,
+    )
+
+    # Combined rotation matrix (Z * Y * X order)
+    Rmat = Rz @ Ry @ Rx
+
+    # Stack coordinates and rotate
+    coords = torch.stack([x.flatten(), y.flatten(), z.flatten()], dim=0)
+    rotated = Rmat @ coords
+
+    xr = rotated[0].reshape(dim, dim, dim)
+    yr = rotated[1].reshape(dim, dim, dim)
+    zr = rotated[2].reshape(dim, dim, dim)
+
+    # Torus equation using rotated coordinates
+    dists = (R - torch.sqrt(xr**2 + yr**2)) ** 2 + zr**2
+
+    volume[dists < r**2] = 1
+
+    return volume
+
+
 def cube_frame(dim=64, size=0.16, r=0.04, R=0.05, rot=[0.0, 0.0, 0.0]):
     volume = torch.zeros((dim, dim, dim), dtype=torch.float32)
 

@@ -8,6 +8,7 @@ import numpy as np
 import torch
 import torch.fft as fft
 import torch.nn.functional as F
+import torchvision.transforms.functional as tv_f
 from torch.fx.node import Target
 
 # Coordinate System:
@@ -79,30 +80,6 @@ class Simulation_ASA_Spectrum:
 
         assert not same_axis, "Included diffirent transducers on same axis!"
         self.transducers.append(transducer)
-
-    def emmiter_field_from_phases(self, emitter_dim: int, phases: torch.Tensor):
-        assert phases.numel() == emitter_dim * emitter_dim, (
-            "Not enough phases for all emitters"
-        )
-
-        cell_size = self.size / self.dim
-        transducer = torch.zeros(
-            (self.dim, self.dim), dtype=torch.complex64, device=self.device
-        )
-
-        cells_per_emitter = np.round(self.emitter_size / cell_size).astype(np.int32)
-        gap_between = (self.dim - cells_per_emitter * emitter_dim) // emitter_dim
-
-        for y in range(emitter_dim):
-            for x in range(emitter_dim):
-                pos_x = int(gap_between // 2 + x * (cells_per_emitter + gap_between))
-                pos_y = int(gap_between // 2 + y * (cells_per_emitter + gap_between))
-
-                transducer[
-                    pos_y : pos_y + cells_per_emitter, pos_x : pos_x + cells_per_emitter
-                ] += 1 * torch.exp(1j * phases[y, x])
-
-        return transducer
 
     def create_propagators(self):
         for transducer in self.transducers:
@@ -177,16 +154,16 @@ class Simulation_ASA_Spectrum:
                 extra // 2 : extra // 2 + self.dim,
             ]
 
-            if tr.orientation == Orientation.Z:
+            if tr.orientation == Orientation_Spectrum.Z:
                 # for mux in range(transducer.t_mux):
                 volume += Uz
-            elif tr.orientation == Orientation.Z_1:
+            elif tr.orientation == Orientation_Spectrum.Z_1:
                 # for mux in range(transducer.t_mux):
                 volume += Uz.rot90(2, (1, 2))
-            elif tr.orientation == Orientation.Y:
+            elif tr.orientation == Orientation_Spectrum.Y:
                 # for mux in range(transducer.t_mux):
                 volume += Uz.rot90(-1, (1, 2))
-            elif tr.orientation == Orientation.X:
+            elif tr.orientation == Orientation_Spectrum.X:
                 # for mux in range(transducer.t_mux):
                 volume += Uz.rot90(-1, (1, 3))
 
@@ -250,23 +227,23 @@ class Simulation_ASA_Spectrum:
                 extra // 2 : extra // 2 + self.dim,
             ]
 
-            if transducer.orientation == Orientation.Z:
+            if transducer.orientation == Orientation_Spectrum.Z:
                 # for mux in range(transducer.t_mux):
                 volume += field
-            elif transducer.orientation == Orientation.Z_1:
+            elif transducer.orientation == Orientation_Spectrum.Z_1:
                 # for mux in range(transducer.t_mux):
                 volume += field.rot90(2, (1, 2))
-            elif transducer.orientation == Orientation.Y:
+            elif transducer.orientation == Orientation_Spectrum.Y:
                 # for mux in range(transducer.t_mux):
                 volume += field.rot90(-1, (1, 2))
-            elif transducer.orientation == Orientation.X:
+            elif transducer.orientation == Orientation_Spectrum.X:
                 # for mux in range(transducer.t_mux):
                 volume += field.rot90(-1, (1, 3))
 
         return volume.abs().sum(dim=0) / total_mux
 
 
-class Orientation(Enum):
+class Orientation_Spectrum(Enum):
     X = 1
     Y = 2
     Z = 3
@@ -280,7 +257,7 @@ class Transducer_Spectrum:
         array_size: float,
         emitter_size: float,
         pos: list,
-        orientation: Orientation = Orientation.Z,
+        orientation: Orientation_Spectrum = Orientation_Spectrum.Z,
         t_mux: int = 1,
         device="cpu",
     ):
@@ -289,7 +266,7 @@ class Transducer_Spectrum:
         self.emitter_size: float = emitter_size
         self.array_size: float = array_size
         self.pos: torch.Tensor = torch.tensor(pos, dtype=torch.float32, device=device)
-        self.orientation: Orientation = orientation
+        self.orientation: Orientation_Spectrum = orientation
         self.t_mux: int = t_mux
         self.device = device
 
@@ -382,7 +359,7 @@ class Transducer_Spectrum:
 
         N = target_size // self.phases.shape[-1]
 
-        complex_field = self.amps * torch.exp(1j * self.phases * 2 * math.pi)
+        complex_field = self.amps * torch.exp(1j * self.phases)
         complex_field = (
             complex_field.repeat_interleave(N, dim=1).repeat_interleave(N, dim=2)
             * self.mask
@@ -393,5 +370,5 @@ class Transducer_Spectrum:
 
 def parse_file(path: str = "emitter_vals/phases.txt"):
     data = np.loadtxt(path)
-    print(data)
+
     return data
