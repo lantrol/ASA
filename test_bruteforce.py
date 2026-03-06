@@ -26,15 +26,15 @@ from volume_utils import (
 )
 
 SAVE_OUTPUT = False
-SKIP_TRAINING = False
+SKIP_TRAINING = True
 
 torch.manual_seed(68)
 
-t_mux = 16
+t_mux = 4
 fr = 40e3
 c = 343.0
 wavelen = c / fr
-sim_dim = 64
+sim_dim = 128
 ds = 0.16 / sim_dim
 
 device = "cuda"
@@ -43,37 +43,41 @@ sim = Simulation_Bruteforce(fr, c, size=0.16, ds=ds, device=device)
 print(sim.dim)
 
 
+# sim.add_transducer(
+#     Transducer_Bruteforce(
+#         emitters_num=16,
+#         array_size=0.16,
+#         emitter_size=ds,
+#         apperture=0.01,
+#         pos=[-0.12, 0, 0],
+#         orientation=Orientation_Bruteforce.X,
+#         t_mux=t_mux,
+#         device=device,
+#     )
+# )
+# sim.add_transducer(
+#     Transducer_Bruteforce(
+#         emitters_num=16,
+#         array_size=0.16,
+#         emitter_size=ds,
+#         apperture=0.01,
+#         pos=[-0.12, 0, 0],
+#         orientation=Orientation_Bruteforce.Y,
+#         t_mux=t_mux,
+#         device=device,
+#     )
+# )
 sim.add_transducer(
     Transducer_Bruteforce(
-        16,
-        0.16,
-        ds,
-        [-0.12, 0, 0],
-        Orientation_Bruteforce.X,
+        emitters_num=2,
+        array_size=0.16,
+        emitter_size=ds,
+        apperture=0.01,
+        pos=[-0.001, 0, 0],
+        orientation=Orientation_Bruteforce.Z,
         t_mux=t_mux,
         device=device,
-    )
-)
-sim.add_transducer(
-    Transducer_Bruteforce(
-        16,
-        0.16,
-        ds,
-        [-0.12, 0, 0],
-        Orientation_Bruteforce.Y,
-        t_mux=t_mux,
-        device=device,
-    )
-)
-sim.add_transducer(
-    Transducer_Bruteforce(
-        16,
-        0.16,
-        ds,
-        [-0.12, 0, 0],
-        Orientation_Bruteforce.Z,
-        t_mux=t_mux,
-        device=device,
+        random_init=False,
     )
 )
 
@@ -97,13 +101,13 @@ sample3 = torch.tensor(np.asarray(image3)[:, :], device=device)
 sample3 = sample3 / sample3.max()
 
 
-# sample = hollow_sphere(sim_dim, 0.16, 0.038)
-# sample = torch.roll(create_donut_rot(sim_dim, 4, 20, [0, 0, 0]), 0, 0)
+# sample = hollow_sphere(sim_dim, 0.16, 0.041)
+sample = torch.roll(create_donut_rot(sim_dim, 3, 20, [0, 0, 0]), 0, 0)
 
 # sample = cube_frame(64, r=0.03, R=0.045, rot=[0, 0, 0])
 # sample = helix()
 # sample += helix(rot=[0, 0, math.pi])
-# sample = sample.to(device)
+sample = sample.to(device)
 
 viewer, layers = napari.imshow(torch.abs(sample).cpu().detach().numpy())
 napari.run()
@@ -116,38 +120,38 @@ for tr in sim.transducers:
 
 start = time.time()
 
-iters = 1200
+iters = 200
 
 optimizer = torch.optim.Adam(params, lr=0.1)
-scheduler = torch.optim.lr_scheduler.StepLR(optimizer, 600, gamma=0.5)
+scheduler = torch.optim.lr_scheduler.StepLR(optimizer, 300, gamma=0.1)
 losses = []
 for k in (pbar := tqdm(range(iters))):
     if SKIP_TRAINING:
         break
     field = sim.calculate_volume()
-    field = field.abs()
+    field = field
 
     # Volume
-    # loss = ((field - sample) ** 2).sum() / field.numel()
+    loss = ((field - sample) ** 2).sum() / field.numel()
 
     # loss = 1 - torch.dot(field.flatten(), sample.flatten()).sum() ** 2 / (
     #     (field**2).sum() * (sample**2).sum() + 1e-8
     # )
 
-    # loss.backward()
+    loss.backward()
 
     # Slice a bit bruteforce-y
-    loss = ((field[0, :, :] - sample) ** 2).sum()
-    loss += ((field[32, :, :] - sample2) ** 2).sum()
-    loss += ((field[63, :, :] - sample3) ** 2).sum()
-    loss.backward()
+    # loss = (torch.abs(field[0, :, :] / field[0, :, :].max() - sample)).sum()
+    # loss += (torch.abs(field[32, :, :] / field[32, :, :].max() - sample2)).sum()
+    # loss += (torch.abs(field[63, :, :] / field[63, :, :].max() - sample3)).sum()
+    # loss.backward()
 
     optimizer.step()
     optimizer.zero_grad()
     scheduler.step()
 
     losses.append(loss.item())
-    pbar.set_description(str(losses[-1]))
+    pbar.set_description(f"{losses[-1]:.5f}")
 
 
 duration = time.time() - start
@@ -159,7 +163,6 @@ duration = time.time() - start
 # plt.show(block=True)
 
 field = sim.calculate_volume()
-
 
 # Saving data to compare
 if SAVE_OUTPUT:
@@ -177,7 +180,16 @@ if SAVE_OUTPUT:
 
 print(sim.transducers[0].amps[:, 0, 0])
 
-viewer, layers = napari.imshow(
-    torch.abs(field).rot90(-0, (0, 1)).cpu().detach().numpy()
+# field_brute = sim.calculate_volume_brute()
+
+viewer = napari.Viewer()
+
+# viewer.add_image(
+#     torch.abs(field_brute).rot90(-0, (0, 1)).cpu().detach().numpy(), name="bruteforce"
+# )
+viewer.add_image(
+    torch.abs(field).rot90(-0, (0, 1)).cpu().detach().numpy(), name="small_conv"
 )
+
+# viewer.add_image(diff.rot90(-0, (0, 1)).cpu().detach().numpy())
 napari.run()
