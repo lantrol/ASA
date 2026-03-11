@@ -179,7 +179,8 @@ class Simulation_Bruteforce:
                 # for mux in range(transducer.t_mux):
                 volume += field.rot90(-1, (1, 3))
 
-        return volume.abs().pow(2).sum(dim=0).sqrt()  # / volume.shape[0]
+        return (volume.abs().pow(2) / volume.shape[0]).sum(dim=0).sqrt()
+        # return volume.abs().sum(dim=0) / volume.shape[0]
 
     def calculate_volume_brute(self):
         # EXTREMELY WIP: Just to confirm equality between methods

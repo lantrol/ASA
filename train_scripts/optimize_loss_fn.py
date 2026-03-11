@@ -1,14 +1,19 @@
-import math
+import itertools
+import json
 import os
+import sys
 import time
+from datetime import datetime, timezone
 
-import glm
 import matplotlib.pyplot as plt
 import napari
 import numpy as np
 import torch
 from PIL import Image
 from tqdm import tqdm
+
+parent_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+sys.path.append(parent_dir)
 
 from asa import (
     Orientation_Bruteforce,
@@ -25,7 +30,7 @@ from volume_utils import (
 )
 
 SAVE_OUTPUT = False
-SKIP_TRAINING = False
+LOG_TRAIN = True
 
 torch.manual_seed(68)
 
@@ -188,59 +193,81 @@ def main():
         random_init=True,
     )
 
-    target = torch.roll(create_donut_rot(sim.dim, 4, 20, [45, 45, 45]), 0, 0)
+    target = torch.roll(create_donut_rot(sim.dim, 4, 20, [0, 0, 0]), 0, 0)
     target = target.to("cuda").type(torch.float32)
 
-    image = Image.open("./samples/domino.png").convert("L")
-    sample = torch.tensor(np.asarray(image)[:, :], device="cuda")
-    sample1 = sample / sample.max()
+    # ---- Optimization parameters and loop ----
 
-    image2 = Image.open("./samples/smiley.png").convert("L")
-    sample2 = torch.tensor(np.asarray(image2)[::2, ::2], device="cuda")
-    sample2 = sample2 / sample2.max()
+    ITERS = 1500
+    utc_time = datetime.now(timezone.utc)
 
-    image3 = Image.open("./samples/loss.png").convert("L")
-    sample3 = torch.tensor(np.asarray(image3)[:, :], device="cuda")
-    sample3 = sample3 / sample3.max()
+    learning_rates = [0.1, 0.03, 0.01, 0.001, 0.0001]
 
-    samples = [sample1, sample2, sample3]
+    loss_functions = [
+        cosine_similarity,
+        mean_squared_error,
+        mean_absolute_error,
+    ]
 
-    loss_functions = [cosine_similarity]  # , mean_absolute_error, mean_squared_error]
+    schedulers = [
+        (None, {}),
+        (torch.optim.lr_scheduler.CosineAnnealingLR, {"T_max": ITERS}),
+        (
+            torch.optim.lr_scheduler.CosineAnnealingLR,
+            {"T_max": ITERS // 3, "eta_min": 0.001},
+        ),
+        (
+            torch.optim.lr_scheduler.MultiStepLR,
+            {"milestones": [800, 1200], "gamma": 0.2},
+        ),
+    ]
 
-    viewer = napari.Viewer()
+    all_configs = list(itertools.product(learning_rates, loss_functions, schedulers))
 
-    for func in loss_functions:
+    for i, config in enumerate(all_configs):
+        print(f"\n --- Config {i + 1} of {len(all_configs)} ---")
+
+        learning_rate = config[0]
+        loss_func = config[1]
+        scheduler_conf = config[2]
+
         for tr in sim.transducers:
             tr.reset_params()
 
-        optimizer = torch.optim.Adam(sim.get_params(), 0.1)
-        scheduler = torch.optim.lr_scheduler.MultiStepLR(
-            optimizer, [800, 1200], gamma=0.2
-        )
-        # scheduler = None
+        optimizer = torch.optim.Adam(sim.get_params(), learning_rate)
 
-        optimize(
+        scheduler = None
+        if scheduler_conf[0] is not None:
+            scheduler = scheduler_conf[0](optimizer, **scheduler_conf[1])
+
+        losses = optimize(
             sim=sim,
             target=target,
             optimizer=optimizer,
-            loss_func=func,
+            loss_func=loss_func,
             scheduler=scheduler,
-            iters=1500,
+            iters=ITERS,
         )
 
-        field = sim.calculate_volume()
-        # field_brute = sim.calculate_volume_brute()
+        if LOG_TRAIN:
+            info = {
+                "base_lr": learning_rate,
+                "loss_function": loss_func.__name__,
+                "scheduler": {
+                    "scheduler_name": "None"
+                    if scheduler_conf[0] is None
+                    else scheduler_conf[0].__name__,
+                    "scheduler_conf": scheduler_conf[1],
+                },
+                "losses": losses,
+            }
 
-        viewer.add_image(
-            torch.abs(field).rot90(-0, (0, 1)).cpu().detach().numpy(),
-            name=func.__name__,
-        )
-        # viewer.add_image(
-        #     torch.abs(field_brute).rot90(-0, (0, 1)).cpu().detach().numpy(),
-        #     name="brute",
-        # )
+            with open(f"train_runs/{utc_time}-config-{i + 1}.json", "w") as json_file:
+                json.dump(info, json_file, indent=4)
 
         if SAVE_OUTPUT:
+            field = sim.calculate_volume()
+
             tr0 = sim.transducers[0]
             tr1 = sim.transducers[1]
             tr2 = sim.transducers[2]
@@ -251,8 +278,6 @@ def main():
             torch.save(all_amps, "cross_compare/all_amps.pt")
             torch.save(all_phases, "cross_compare/all_phases.pt")
             torch.save(field, "cross_compare/volume.pt")
-
-    napari.run()
 
 
 if __name__ == "__main__":
