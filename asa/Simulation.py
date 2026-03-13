@@ -12,7 +12,7 @@ import torch.nn.functional as F
 # Trying to see if something similar to ASA Convolution can be used for bruteforce method
 
 
-class Simulation_Bruteforce:
+class Simulation:
     def __init__(
         self,
         fr,
@@ -34,7 +34,7 @@ class Simulation_Bruteforce:
         self.optimize_amps = optimize_amps
 
         self.transducers: list[
-            Transducer_Bruteforce
+            Transducer
         ] = []  # Array of num_emitter x num_emitter phases
         self.propagators: list[torch.Tensor] = []  # Propagator matrix
 
@@ -53,7 +53,7 @@ class Simulation_Bruteforce:
 
     def create_propagators(self):
         for transducer in self.transducers:
-            transducer.init_transducer(self.ds)
+            transducer.init_point_transducer(self.ds)
 
             # TEST: reuse only 1 for memory
             if len(self.propagators) > 0:
@@ -82,7 +82,7 @@ class Simulation_Bruteforce:
             z_coords = (
                 torch.arange(0, self.dim, device=self.device).view(-1, 1, 1).float()
                 * self.ds
-            )
+            )  # TODO: REVISAR ESTO, EL VOLUMEN NO ESTA CENTRADO?
 
             # Expand dimensions for broadcasting to match the propagator shape [dim, dim, dim]
             x_coords = x_coords.expand(self.dim, self.dim * 2, -1)
@@ -125,7 +125,7 @@ class Simulation_Bruteforce:
 
             self.propagators.append(propagator)
 
-    def calculate_volume(self):
+    def calculate_volume(self, use_mean: bool = False):
         # For now assume there is only one for testing :P
         volume = torch.zeros(
             (self.transducers[0].t_mux, self.dim, self.dim, self.dim),
@@ -135,9 +135,6 @@ class Simulation_Bruteforce:
 
         for idx, transducer in enumerate(self.transducers):
             emitter = transducer.rounded_emitters(self.ds)
-
-            # plt.imshow(emitter[0, :, :].abs().cpu().detach().numpy())
-            # plt.show(block=True)
 
             (x, y, z) = emitter.size()
             emitter = emitter.reshape(x, 1, y, z)
@@ -166,21 +163,19 @@ class Simulation_Bruteforce:
                 extra // 2 : extra // 2 + self.dim,
             ]
 
-            if transducer.orientation == Orientation_Bruteforce.Z:
-                # for mux in range(transducer.t_mux):
+            if transducer.orientation == Orientation.Z:
                 volume += field
-            elif transducer.orientation == Orientation_Bruteforce.Z_1:
-                # for mux in range(transducer.t_mux):
+            elif transducer.orientation == Orientation.Z_1:
                 volume += field.rot90(2, (1, 2))
-            elif transducer.orientation == Orientation_Bruteforce.Y:
-                # for mux in range(transducer.t_mux):
+            elif transducer.orientation == Orientation.Y:
                 volume += field.rot90(-1, (1, 2))
-            elif transducer.orientation == Orientation_Bruteforce.X:
-                # for mux in range(transducer.t_mux):
+            elif transducer.orientation == Orientation.X:
                 volume += field.rot90(-1, (1, 3))
 
+        if use_mean:
+            return volume.abs().sum(dim=0) / volume.shape[0]
+
         return (volume.abs().pow(2) / volume.shape[0]).sum(dim=0).sqrt()
-        # return volume.abs().sum(dim=0) / volume.shape[0]
 
     def calculate_volume_brute(self):
         # EXTREMELY WIP: Just to confirm equality between methods
@@ -226,18 +221,14 @@ class Simulation_Bruteforce:
                             extra // 2 : extra // 2 + self.dim,
                         ]
 
-                        if transducer.orientation == Orientation_Bruteforce.Z:
-                            # for mux in range(transducer.t_mux):
+                        if transducer.orientation == Orientation.Z:
                             volume[tmx, :, :, :] += field
-                        elif transducer.orientation == Orientation_Bruteforce.Z_1:
-                            # for mux in range(transducer.t_mux):
+                        elif transducer.orientation == Orientation.Z_1:
                             volume[tmx, :, :, :] += field.rot90(2, (0, 1))
-                        elif transducer.orientation == Orientation_Bruteforce.Y:
-                            # for mux in range(transducer.t_mux):
-                            volume[tmx, :, :, :] += field.rot90(-1, (0, 1))
-                        elif transducer.orientation == Orientation_Bruteforce.X:
-                            # for mux in range(transducer.t_mux):
-                            volume[tmx, :, :, :] += field.rot90(-1, (0, 2))
+                        elif transducer.orientation == Orientation.Y:
+                            volume[tmx, :, :, :] += field.rot90(1, (0, 1))
+                        elif transducer.orientation == Orientation.X:
+                            volume[tmx, :, :, :] += field.rot90(1, (0, 2))
 
                     propagator = None
 
@@ -294,14 +285,14 @@ class Simulation_Bruteforce:
         return (1.0 / (dist + 1e-9)) * torch.exp(1j * (self.k * dist))
 
 
-class Orientation_Bruteforce(Enum):
+class Orientation(Enum):
     X = 1
     Y = 2
     Z = 3
     Z_1 = 4
 
 
-class Transducer_Bruteforce:
+class Transducer:
     def __init__(
         self,
         emitters_num: int,
@@ -309,9 +300,10 @@ class Transducer_Bruteforce:
         emitter_size: float,
         apperture: float,
         pos: list,
-        orientation: Orientation_Bruteforce = Orientation_Bruteforce.Z,
+        orientation: Orientation = Orientation.Z,
         t_mux: int = 1,
         random_init=True,
+        checkerboard=False,
         device="cpu",
     ):
         self.phases: torch.Tensor
@@ -321,21 +313,24 @@ class Transducer_Bruteforce:
         self.apperture: float = apperture
         self.array_size: float = array_size
         self.pos: torch.Tensor = torch.tensor(pos, dtype=torch.float32, device=device)
-        self.orientation: Orientation_Bruteforce = orientation
+        self.orientation: Orientation = orientation
         self.t_mux: int = t_mux
         self.device = device
         self.random_init = random_init
+        self.checkerboard = checkerboard
+
+        dim_x, dim_y = emitters_num, emitters_num
 
         if random_init:
             self.phases = torch.rand(
-                (t_mux, emitters_num, emitters_num),
+                (t_mux, dim_y, dim_x),
                 dtype=torch.float32,
                 requires_grad=True,
                 device=self.device,
             )
 
             self.amps = torch.rand(
-                (t_mux, emitters_num, emitters_num),
+                (t_mux, dim_y, dim_x),
                 dtype=torch.float32,
                 requires_grad=True,
                 device=self.device,
@@ -343,14 +338,14 @@ class Transducer_Bruteforce:
 
         else:
             self.phases = torch.zeros(
-                (t_mux, emitters_num, emitters_num),
+                (t_mux, dim_y, dim_x),
                 dtype=torch.float32,
                 requires_grad=True,
                 device=self.device,
             )
 
             self.amps = torch.ones(
-                (t_mux, emitters_num, emitters_num),
+                (t_mux, dim_y, dim_x),
                 dtype=torch.float32,
                 requires_grad=True,
                 device=self.device,
@@ -358,6 +353,8 @@ class Transducer_Bruteforce:
 
         with torch.no_grad():
             self.phases *= 2 * math.pi
+            self.amps *= 2
+            self.amps -= 1
 
         # Persistent info por complex plane calculation
         # Used to make calculations faster by saving information
@@ -365,16 +362,18 @@ class Transducer_Bruteforce:
         self.mask: torch.Tensor = None
 
     def reset_params(self):
+        dim_x, dim_y = self.emitters_num, self.emitters_num
+
         if self.random_init:
             self.phases = torch.rand(
-                (self.t_mux, self.emitters_num, self.emitters_num),
+                (self.t_mux, dim_y, dim_x),
                 dtype=torch.float32,
                 requires_grad=True,
                 device=self.device,
             )
 
             self.amps = torch.rand(
-                (self.t_mux, self.emitters_num, self.emitters_num),
+                (self.t_mux, dim_y, dim_x),
                 dtype=torch.float32,
                 requires_grad=True,
                 device=self.device,
@@ -382,26 +381,31 @@ class Transducer_Bruteforce:
 
         else:
             self.phases = torch.zeros(
-                (self.t_mux, self.emitters_num, self.emitters_num),
+                (self.t_mux, dim_y, dim_x),
                 dtype=torch.float32,
                 requires_grad=True,
                 device=self.device,
             )
 
             self.amps = torch.ones(
-                (self.t_mux, self.emitters_num, self.emitters_num),
+                (self.t_mux, dim_y, dim_x),
                 dtype=torch.float32,
                 requires_grad=True,
                 device=self.device,
             )
 
-    def init_transducer(self, ds: float):
+        with torch.no_grad():
+            self.phases *= 2 * math.pi
+            self.amps *= 2
+            self.amps -= 1
+
+    def init_round_transducer(self, ds: float):
         # This creates a mask that will be used later when creating the complex plane
         # Made separately and saved to speed up execution a bit
 
         target_size = round(self.array_size / ds)
 
-        gap_between = self.array_size / self.phases.shape[-1]
+        gap_between = self.array_size / self.phases.shape[-2]
 
         dim_range_x = torch.arange(
             0, target_size, dtype=torch.float32, device=self.device
@@ -418,13 +422,56 @@ class Transducer_Bruteforce:
             dim=0,
         )
 
+        cells_per_emitter = target_size // self.emitters_num
+
         positions = ((positions * ds) % gap_between) - gap_between / 2
         dists = torch.sqrt((positions**2).sum(dim=0))
 
+        plt.imshow(dists.abs().cpu().numpy())
+        plt.show(block=True)
+
+        if self.checkerboard:
+            dists = dists.roll(
+                (-cells_per_emitter // 2, -cells_per_emitter // 2), (0, 1)
+            )
+
+            dists[:: cells_per_emitter * 2, :] = dists[
+                :: cells_per_emitter * 2, :
+            ].roll(cells_per_emitter // 2, 1)
+
+            dists = dists.roll((cells_per_emitter // 2, cells_per_emitter // 4), (0, 1))
+
         self.mask = dists <= self.emitter_size / 2
 
-        # roll_size = int(round((gap_between / 2) / ds))
-        # self.mask = torch.roll(self.mask, (-roll_size, -roll_size), (0, 1))
+    def init_point_transducer(self, ds: float):
+        # This creates a mask that will be used later when creating the complex plane
+        # Made separately and saved to speed up execution a bit
+
+        target_size = round(self.array_size / ds)
+
+        cells_per_emitter = target_size // self.emitters_num
+
+        self.mask = torch.zeros(
+            (target_size, target_size), dtype=torch.bool, device=self.device
+        )
+
+        self.mask[
+            cells_per_emitter // 2 :: cells_per_emitter,
+            cells_per_emitter // 2 :: cells_per_emitter,
+        ] = True
+
+        if self.checkerboard:
+            self.mask = self.mask.roll(
+                (-(cells_per_emitter // 2), -(cells_per_emitter // 2)), (0, 1)
+            )
+
+            self.mask[:: cells_per_emitter * 2, :] = self.mask[
+                :: cells_per_emitter * 2, :
+            ].roll(cells_per_emitter // 2, 1)
+
+            self.mask = self.mask.roll(
+                (cells_per_emitter // 2, cells_per_emitter // 4), (0, 1)
+            )
 
     def to_complex_plane(self, ds: float):
         target_size = round(self.array_size / ds)
@@ -464,9 +511,16 @@ class Transducer_Bruteforce:
     def rounded_emitters(self, ds: float):
         target_size = round(self.array_size / ds)
 
-        N = target_size // self.phases.shape[-1]
+        assert target_size % self.emitters_num == 0, (
+            "Volume size must be multiple of emitter_num to allow correct spacing!"
+        )
 
-        complex_field = F.sigmoid(self.amps) * torch.exp(1j * self.phases)
+        shape = self.phases.shape
+
+        N = target_size // shape[-1]
+
+        complex_field = F.sigmoid(self.amps) * torch.exp(1j * (self.phases))
+
         complex_field = (
             complex_field.repeat_interleave(N, dim=1).repeat_interleave(N, dim=2)
             * self.mask

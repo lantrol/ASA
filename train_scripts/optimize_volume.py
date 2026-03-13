@@ -1,5 +1,6 @@
 import itertools
 import json
+import math
 import os
 import sys
 import time
@@ -36,14 +37,16 @@ torch.manual_seed(68)
 
 
 def init_simulation(
-    t_mux=16,
     fr=40e3,
     c=343.0,
+    t_mux=16,
+    num_emitters=16,
     sim_dim=64,
     num_arrays: int = 3,
     pos_z=-0.11,
     device="cuda",
     random_init=True,
+    checkerboard=False,
 ):
     ds = 0.16 / sim_dim
 
@@ -52,7 +55,7 @@ def init_simulation(
 
     sim.add_transducer(
         Transducer(
-            emitters_num=16,
+            emitters_num=num_emitters,
             array_size=0.16,
             emitter_size=ds,
             apperture=0.01,
@@ -61,13 +64,14 @@ def init_simulation(
             t_mux=t_mux,
             device=device,
             random_init=random_init,
+            checkerboard=checkerboard,
         )
     )
 
     if num_arrays > 1:
         sim.add_transducer(
             Transducer(
-                emitters_num=16,
+                emitters_num=num_emitters,
                 array_size=0.16,
                 emitter_size=ds,
                 apperture=0.01,
@@ -76,12 +80,13 @@ def init_simulation(
                 t_mux=t_mux,
                 device=device,
                 random_init=random_init,
+                checkerboard=checkerboard,
             )
         )
     if num_arrays > 2:
         sim.add_transducer(
             Transducer(
-                emitters_num=16,
+                emitters_num=num_emitters,
                 array_size=0.16,
                 emitter_size=ds,
                 apperture=0.01,
@@ -90,12 +95,14 @@ def init_simulation(
                 t_mux=t_mux,
                 device=device,
                 random_init=random_init,
+                checkerboard=checkerboard,
             )
         )
+
     if num_arrays == -1:
         sim.add_transducer(
             Transducer(
-                emitters_num=16,
+                emitters_num=num_emitters,
                 array_size=0.16,
                 emitter_size=ds,
                 apperture=0.01,
@@ -104,15 +111,28 @@ def init_simulation(
                 t_mux=t_mux,
                 device=device,
                 random_init=random_init,
+                checkerboard=checkerboard,
             )
         )
 
     sim.create_propagators()
 
+    field_sample = sim.transducers[0].rounded_emitters(sim.ds)
+    plt.imshow(field_sample.abs()[0, :, :].cpu().detach().numpy())
+    plt.show()
+
     return sim
 
 
-def optimize_slices(sim, targets, optimizer, loss_func, iters=800, scheduler=None):
+def optimize(
+    sim,
+    target,
+    optimizer,
+    loss_func,
+    iters=800,
+    scheduler=None,
+    use_mean=False,
+):
     print(f"Configuration:")
     print(f"Loss function: {loss_func.__name__}")
     print(f"Optimizer: {type(optimizer)}")
@@ -122,39 +142,7 @@ def optimize_slices(sim, targets, optimizer, loss_func, iters=800, scheduler=Non
     start = time.time()
     losses = []
     for k in (pbar := tqdm(range(iters))):
-        field = sim.calculate_volume()
-
-        loss = loss_slice(field, targets[0], loss_func, 0)
-        loss += loss_slice(field, targets[1], loss_func, 32)
-        loss += loss_slice(field, targets[2], loss_func, 63)
-
-        loss.backward()
-
-        optimizer.step()
-        optimizer.zero_grad()
-
-        if scheduler is not None:
-            scheduler.step()
-
-        losses.append(loss.item())
-        pbar.set_description(f"{loss.item():.5f}")
-
-    duration = time.time() - start
-    print(f"Optimization took: {duration:.3f} seconds")
-    return losses
-
-
-def optimize(sim, target, optimizer, loss_func, iters=800, scheduler=None):
-    print(f"Configuration:")
-    print(f"Loss function: {loss_func.__name__}")
-    print(f"Optimizer: {type(optimizer)}")
-    if scheduler is not None:
-        print(f"Scheduler: {type(scheduler)}")
-
-    start = time.time()
-    losses = []
-    for k in (pbar := tqdm(range(iters))):
-        field = sim.calculate_volume()
+        field = sim.calculate_volume(use_mean=use_mean)
 
         loss = loss_func(field, target)
         loss.backward()
@@ -174,8 +162,9 @@ def optimize(sim, target, optimizer, loss_func, iters=800, scheduler=None):
 
 
 def cosine_similarity(field, target):
-    loss = 1 - torch.dot(field.flatten(), target.flatten()).sum() ** 2 / (
-        (field**2).sum() * (target**2).sum() + 1e-8
+    field_norm = field / field.max()
+    loss = 1 - torch.dot(field_norm.flatten(), target.flatten()).sum() ** 2 / (
+        (field_norm**2).sum() * (target**2).sum() + 1e-8
     )
 
     return loss
@@ -197,87 +186,55 @@ def loss_slice(field, slice, loss_func, layer):
 
 
 def main():
-    sim = init_simulation(
-        t_mux=16,
-        fr=40e3,
-        c=343.0,
-        sim_dim=64,
-        num_arrays=3,
-        pos_z=-0.12,
-        random_init=True,
-    )
+    DIM = 64
 
-    target = torch.roll(create_donut_rot(sim.dim, 4, 20, [0, 0, 0]), 0, 0)
+    target = torch.roll(create_donut_rot(DIM, 2, 22, [45, 45, 0]), 0, 0)
     target = target.to("cuda").type(torch.float32)
 
-    # ---- Optimization parameters and loop ----
+    # ---- Array amount optim ----
 
     ITERS = 1500
-    utc_time = datetime.now(timezone.utc)
 
-    learning_rates = [0.1, 0.03, 0.01, 0.001, 0.0001]
+    for num_arrays in range(3, 4):
+        sim = init_simulation(
+            fr=40e3,
+            c=343.0,
+            t_mux=16,
+            num_emitters=16,
+            sim_dim=DIM,
+            num_arrays=num_arrays,
+            pos_z=-0.11,
+            random_init=True,
+            checkerboard=True,
+        )
 
-    loss_functions = [
-        cosine_similarity,
-        mean_squared_error,
-        mean_absolute_error,
-    ]
+        optimizer = torch.optim.Adam(sim.get_params(), 0.1)
 
-    schedulers = [
-        (None, {}),
-        (torch.optim.lr_scheduler.CosineAnnealingLR, {"T_max": ITERS}),
-        (
-            torch.optim.lr_scheduler.CosineAnnealingLR,
-            {"T_max": ITERS // 3, "eta_min": 0.001},
-        ),
-        (
-            torch.optim.lr_scheduler.MultiStepLR,
-            {"milestones": [800, 1200], "gamma": 0.2},
-        ),
-    ]
-
-    all_configs = list(itertools.product(learning_rates, loss_functions, schedulers))
-
-    for i, config in enumerate(all_configs):
-        print(f"\n --- Config {i + 1} of {len(all_configs)} ---")
-
-        learning_rate = config[0]
-        loss_func = config[1]
-        scheduler_conf = config[2]
-
-        for tr in sim.transducers:
-            tr.reset_params()
-
-        optimizer = torch.optim.Adam(sim.get_params(), learning_rate)
-
-        scheduler = None
-        if scheduler_conf[0] is not None:
-            scheduler = scheduler_conf[0](optimizer, **scheduler_conf[1])
+        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+            optimizer,
+            T_max=ITERS // 3,
+            eta_min=0.001,
+        )
 
         losses = optimize(
             sim=sim,
             target=target,
             optimizer=optimizer,
-            loss_func=loss_func,
+            loss_func=cosine_similarity,
             scheduler=scheduler,
             iters=ITERS,
         )
 
-        if LOG_TRAIN:
-            info = {
-                "base_lr": learning_rate,
-                "loss_function": loss_func.__name__,
-                "scheduler": {
-                    "scheduler_name": "None"
-                    if scheduler_conf[0] is None
-                    else scheduler_conf[0].__name__,
-                    "scheduler_conf": scheduler_conf[1],
-                },
-                "losses": losses,
-            }
+        field = sim.calculate_volume()
 
-            with open(f"train_runs/{utc_time}-config-{i + 1}.json", "w") as json_file:
-                json.dump(info, json_file, indent=4)
+        viewer = napari.Viewer()
+        viewer.add_image(
+            torch.abs(field).rot90(-0, (0, 1)).cpu().detach().numpy(),
+            name=f"{num_arrays}",
+        )
+
+        if LOG_TRAIN:
+            print(f"With {num_arrays} arrays -> {losses[-1]}")
 
         if SAVE_OUTPUT:
             field = sim.calculate_volume()
@@ -292,6 +249,8 @@ def main():
             torch.save(all_amps, "cross_compare/all_amps.pt")
             torch.save(all_phases, "cross_compare/all_phases.pt")
             torch.save(field, "cross_compare/volume.pt")
+
+    napari.run()
 
 
 if __name__ == "__main__":

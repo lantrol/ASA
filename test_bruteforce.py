@@ -12,9 +12,9 @@ from scipy.spatial import cKDTree
 from tqdm import tqdm
 
 from asa import (
-    Orientation_Bruteforce,
-    Simulation_Bruteforce,
-    Transducer_Bruteforce,
+    Orientation,
+    Simulation,
+    Transducer,
 )
 from volume_utils import (
     create_donut,
@@ -39,42 +39,42 @@ ds = 0.16 / sim_dim
 
 device = "cuda"
 
-sim = Simulation_Bruteforce(fr, c, size=0.16, ds=ds, device=device)
+sim = Simulation(fr, c, size=0.16, ds=ds, device=device)
 print(sim.dim)
 
 
 sim.add_transducer(
-    Transducer_Bruteforce(
+    Transducer(
         emitters_num=16,
         array_size=0.16,
         emitter_size=ds,
         apperture=0.01,
         pos=[-0.12, 0, 0],
-        orientation=Orientation_Bruteforce.X,
+        orientation=Orientation.X,
         t_mux=t_mux,
         device=device,
     )
 )
 sim.add_transducer(
-    Transducer_Bruteforce(
+    Transducer(
         emitters_num=16,
         array_size=0.16,
         emitter_size=ds,
         apperture=0.01,
         pos=[-0.12, 0, 0],
-        orientation=Orientation_Bruteforce.Y,
+        orientation=Orientation.Y,
         t_mux=t_mux,
         device=device,
     )
 )
 sim.add_transducer(
-    Transducer_Bruteforce(
+    Transducer(
         emitters_num=16,
         array_size=0.16,
         emitter_size=ds,
         apperture=0.01,
         pos=[-0.12, 0, 0],
-        orientation=Orientation_Bruteforce.Z,
+        orientation=Orientation.Z,
         t_mux=t_mux,
         device=device,
         random_init=True,

@@ -17,9 +17,9 @@ parent_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 sys.path.append(parent_dir)
 
 from asa import (
-    Orientation_Bruteforce,
-    Simulation_Bruteforce,
-    Transducer_Bruteforce,
+    Orientation,
+    Simulation,
+    Transducer,
 )
 from volume_utils import (
     create_donut,
@@ -37,69 +37,97 @@ torch.manual_seed(68)
 
 
 def init_simulation(
-    t_mux=16,
     fr=40e3,
     c=343.0,
+    t_mux=16,
+    num_emitters=16,
     sim_dim=64,
     num_arrays: int = 3,
     pos_z=-0.11,
     device="cuda",
     random_init=True,
+    checkerboard=False,
 ):
     ds = 0.16 / sim_dim
 
-    sim = Simulation_Bruteforce(fr, c, size=0.16, ds=ds, device=device)
+    sim = Simulation(fr, c, size=0.16, ds=ds, device=device)
     print(sim.dim)
 
     sim.add_transducer(
-        Transducer_Bruteforce(
-            emitters_num=16,
+        Transducer(
+            emitters_num=num_emitters,
             array_size=0.16,
             emitter_size=ds,
             apperture=0.01,
             pos=[pos_z, 0, 0],
-            orientation=Orientation_Bruteforce.Z,
+            orientation=Orientation.Z,
             t_mux=t_mux,
             device=device,
             random_init=random_init,
+            checkerboard=checkerboard,
         )
     )
 
     if num_arrays > 1:
         sim.add_transducer(
-            Transducer_Bruteforce(
-                emitters_num=16,
+            Transducer(
+                emitters_num=num_emitters,
                 array_size=0.16,
                 emitter_size=ds,
                 apperture=0.01,
                 pos=[pos_z, 0, 0],
-                orientation=Orientation_Bruteforce.Y,
+                orientation=Orientation.Y,
                 t_mux=t_mux,
                 device=device,
                 random_init=random_init,
+                checkerboard=checkerboard,
             )
         )
     if num_arrays > 2:
         sim.add_transducer(
-            Transducer_Bruteforce(
-                emitters_num=16,
+            Transducer(
+                emitters_num=num_emitters,
                 array_size=0.16,
                 emitter_size=ds,
                 apperture=0.01,
                 pos=[pos_z, 0, 0],
-                orientation=Orientation_Bruteforce.X,
+                orientation=Orientation.X,
                 t_mux=t_mux,
                 device=device,
                 random_init=random_init,
+                checkerboard=checkerboard,
+            )
+        )
+
+    if num_arrays == -1:
+        sim.add_transducer(
+            Transducer(
+                emitters_num=num_emitters,
+                array_size=0.16,
+                emitter_size=ds,
+                apperture=0.01,
+                pos=[pos_z, 0, 0],
+                orientation=Orientation.Z_1,
+                t_mux=t_mux,
+                device=device,
+                random_init=random_init,
+                checkerboard=checkerboard,
             )
         )
 
     sim.create_propagators()
 
+    field_sample = sim.transducers[0].rounded_emitters(sim.ds)
+
+    # plt.imshow(field_sample.abs()[0, :, :].cpu().detach().numpy())
+    # plt.show()
+
     return sim
 
 
-def optimize_slices(sim, targets, optimizer, loss_func, iters=800, scheduler=None):
+def optimize_slices(
+    sim, targets, optimizer, loss_func, iters=800, scheduler=None, use_mean=False
+):
     assert len(targets) > 0, "No target slices passed"
 
     print(f"Configuration:")
@@ -112,7 +140,7 @@ def optimize_slices(sim, targets, optimizer, loss_func, iters=800, scheduler=Non
     losses = []
     vals = []
     for k in (pbar := tqdm(range(iters))):
-        field = sim.calculate_volume()
+        field = sim.calculate_volume(use_mean=use_mean)
 
         loss = loss_slice(field, targets[0], loss_func, 0)
         space = (sim.dim - 1) // max(len(targets) - 1, 1)
@@ -205,6 +233,10 @@ def main():
     sample3 = torch.tensor(np.asarray(image3)[:, :], device="cuda")
     sample3 = sample3 / sample3.max()
 
+    image4 = Image.open("./samples/domino.png").convert("L")
+    sample4 = torch.tensor(np.asarray(image4)[:, :], device="cuda")
+    sample4 = sample4 / sample4.max()
+
     samples = [sample1, sample2, sample3]
 
     # ---- Array amount optim ----
@@ -214,20 +246,28 @@ def main():
 
     for num_arrays in range(3, 4):
         sim = init_simulation(
-            t_mux=16,
             fr=40e3,
             c=343.0,
             sim_dim=64,
+            t_mux=16,
+            num_emitters=16,
             num_arrays=num_arrays,
             pos_z=-0.11,
             random_init=True,
+            checkerboard=True,
         )
 
         optimizer = torch.optim.Adam(sim.get_params(), 0.1)
 
         scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
-            optimizer, ITERS // 3, eta_min=0.001
+            optimizer, ITERS, eta_min=0.001
         )
+
+        # scheduler = torch.optim.lr_scheduler.OneCycleLR(
+        #     optimizer, max_lr=0.1, total_steps=ITERS
+        # )
+
+        scheduler = None
 
         losses = optimize_slices(
             sim=sim,
