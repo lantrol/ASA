@@ -11,6 +11,11 @@ import torch.nn.functional as F
 # WIP:
 # Trying to see if something similar to ASA Convolution can be used for bruteforce method
 
+# --- Coordinate System ---
+# - In all places, the indexing of axis is [z, y, x]
+# - This is kinda the standard of torch/numpy
+#
+
 
 class Simulation:
     def __init__(
@@ -38,6 +43,10 @@ class Simulation:
         ] = []  # Array of num_emitter x num_emitter phases
         self.propagators: list[torch.Tensor] = []  # Propagator matrix
 
+        # Info for when adding transducers
+        self.min_dist = np.inf
+        self.max_dist = 0
+
     def get_params(self):
         params = []
         for tr in self.transducers:
@@ -49,81 +58,82 @@ class Simulation:
         same_axis = False
         for tr in self.transducers:
             same_axis = same_axis or tr.orientation == transducer.orientation
+
+        min_dist = -transducer.pos[0]
+        max_dist = min_dist + self.dim * self.ds
+
+        self.min_dist = min(self.min_dist, min_dist)
+        self.max_dist = max(self.max_dist, max_dist)
+
         self.transducers.append(transducer)
 
     def create_propagators(self):
+        # Initialize transducers (creates mask)
         for transducer in self.transducers:
-            transducer.init_point_transducer(self.ds)
+            transducer.init_transducer(self.ds)
 
-            # TEST: reuse only 1 for memory
-            if len(self.propagators) > 0:
-                continue
+        # Now create the propagator
+        vertical_dim = math.ceil(float((self.max_dist - self.min_dist) / self.ds))
 
-            # TEST: Propagator of needed size from start
-            propagator = torch.zeros(
-                (self.dim, self.dim * 2, self.dim * 2),
-                dtype=torch.complex64,
-                device=self.device,
-            )
+        # TEST: Propagator of needed size from start
+        propagator = torch.zeros(
+            (self.dim, self.dim * 2, self.dim * 2),
+            dtype=torch.complex64,
+            device=self.device,
+        )
 
-            # Create the coordinate grid
-            x_coords = (
-                torch.arange(-self.dim, self.dim, device=self.device)
-                .view(1, 1, -1)
-                .float()
-                * self.ds
-            )
-            y_coords = (
-                torch.arange(-self.dim, self.dim, device=self.device)
-                .view(1, -1, 1)
-                .float()
-                * self.ds
-            )
-            z_coords = (
-                torch.arange(0, self.dim, device=self.device).view(-1, 1, 1).float()
-                * self.ds
-            )  # TODO: REVISAR ESTO, EL VOLUMEN NO ESTA CENTRADO?
+        # Create the coordinate grid
+        x_coords = (
+            torch.arange(-self.dim, self.dim, device=self.device).view(1, 1, -1).float()
+            * self.ds
+        )
+        y_coords = (
+            torch.arange(-self.dim, self.dim, device=self.device).view(1, -1, 1).float()
+            * self.ds
+        )
+        z_coords = (
+            torch.arange(0, vertical_dim, device=self.device).view(-1, 1, 1).float()
+            * self.ds
+        )  # TODO: REVISAR ESTO, EL VOLUMEN NO ESTA CENTRADO?
 
-            # Expand dimensions for broadcasting to match the propagator shape [dim, dim, dim]
-            x_coords = x_coords.expand(self.dim, self.dim * 2, -1)
-            y_coords = y_coords.expand(self.dim, -1, self.dim * 2)
-            z_coords = z_coords.expand(-1, self.dim * 2, self.dim * 2)
+        # Expand dimensions for broadcasting to match the propagator shape [dim, dim, dim]
+        x_coords = x_coords.expand(vertical_dim, self.dim * 2, -1)
+        y_coords = y_coords.expand(vertical_dim, -1, self.dim * 2)
+        z_coords = z_coords.expand(-1, self.dim * 2, self.dim * 2)
 
-            cell_pos = torch.stack(
-                [
-                    z_coords,
-                    y_coords,
-                    x_coords,
-                ],
-                dim=0,
-            )
+        cell_pos = torch.stack(
+            [
+                z_coords,
+                y_coords,
+                x_coords,
+            ],
+            dim=0,
+        )
 
-            # Ensure transducer.pos broadcasts to (3, 1, 1, 1)
-            transducer_pos_broad = transducer.pos.unsqueeze(1).unsqueeze(1).unsqueeze(1)
+        closest_tr_pos = torch.tensor(
+            [self.min_dist, 0, 0], dtype=torch.float32, device=self.device
+        ).reshape(3, 1, 1, 1)
 
-            between = cell_pos - transducer_pos_broad
-            dist = torch.norm(between, dim=0)
-            normal_vec = torch.tensor(
-                [1.0, 0.0, 0.0], device=self.device, dtype=torch.float32
-            ).reshape(3, 1, 1, 1)
+        between = cell_pos + closest_tr_pos
+        dist = torch.norm(between, dim=0)
 
-            dots = (between * normal_vec).sum(dim=0)
-            # print(f"Dots: {dots.shape}")
+        normal_vec = torch.tensor(
+            [1.0, 0.0, 0.0], device=self.device, dtype=torch.float32
+        ).reshape(3, 1, 1, 1)
 
-            angle = torch.arccos(dots / dist / torch.norm(normal_vec))
-            # print(f"Angle: {angle.shape}")
+        dots = (between * normal_vec).sum(dim=0)
 
-            # TEMP: Define emitter values here, later add to Transducer()
-            apperture = transducer.apperture
-            dum = 0.5 * apperture * self.k * torch.sin(angle)
-            # print(f"Dum: {dum.shape}")
+        angle = torch.arccos(dots / dist / torch.norm(normal_vec))
 
-            directivity = torch.sinc(dum)
-            # print(f"directivity: {directivity.shape}")
+        # For now only one apperture value supported
+        apperture = self.transducers[0].apperture
+        dum = 0.5 * apperture * self.k * torch.sin(angle)
 
-            propagator = (directivity / (dist + 1e-9)) * torch.exp(1j * (self.k * dist))
+        directivity = torch.sinc(dum / torch.pi)
 
-            self.propagators.append(propagator)
+        propagator = (directivity / (dist + 1e-9)) * torch.exp(1j * (self.k * dist))
+
+        self.propagators.append(propagator)
 
     def calculate_volume(self, use_mean: bool = False):
         # For now assume there is only one for testing :P
@@ -134,13 +144,16 @@ class Simulation:
         )
 
         for idx, transducer in enumerate(self.transducers):
-            emitter = transducer.rounded_emitters(self.ds)
+            emitter = transducer.to_rounded_emitters(self.ds)
 
             (x, y, z) = emitter.size()
             emitter = emitter.reshape(x, 1, y, z)
 
             # TEST: Always use first propagator to save memory (there is only 1)
             propagator = self.propagators[0]
+
+            ini_idx = round(float(-transducer.pos[0] - self.min_dist) / self.ds)
+            propagator = propagator[ini_idx : ini_idx + self.dim, :, :]
 
             # TEST: Only pad emitter, propagator comes in needed size
             padded_emitter = F.pad(
@@ -173,7 +186,7 @@ class Simulation:
                 volume += field.rot90(-1, (1, 3))
 
         if use_mean:
-            return volume.abs().sum(dim=0) / volume.shape[0]
+            return volume.abs().pow(2).sum(dim=0) / volume.shape[0]
 
         return (volume.abs().pow(2) / volume.shape[0]).sum(dim=0).sqrt()
 
@@ -304,6 +317,7 @@ class Transducer:
         t_mux: int = 1,
         random_init=True,
         checkerboard=False,
+        round_emitters=False,
         device="cpu",
     ):
         self.phases: torch.Tensor
@@ -318,6 +332,7 @@ class Transducer:
         self.device = device
         self.random_init = random_init
         self.checkerboard = checkerboard
+        self.round_emitters = round_emitters
 
         dim_x, dim_y = emitters_num, emitters_num
 
@@ -379,6 +394,11 @@ class Transducer:
                 device=self.device,
             )
 
+            with torch.no_grad():
+                self.phases *= 2 * math.pi
+                self.amps *= 2
+                self.amps -= 1
+
         else:
             self.phases = torch.zeros(
                 (self.t_mux, dim_y, dim_x),
@@ -394,10 +414,8 @@ class Transducer:
                 device=self.device,
             )
 
-        with torch.no_grad():
-            self.phases *= 2 * math.pi
-            self.amps *= 2
-            self.amps -= 1
+            with torch.no_grad():
+                self.amps *= 4
 
     def init_round_transducer(self, ds: float):
         # This creates a mask that will be used later when creating the complex plane
@@ -430,22 +448,28 @@ class Transducer:
         plt.imshow(dists.abs().cpu().numpy())
         plt.show(block=True)
 
-        if self.checkerboard:
-            dists = dists.roll(
-                (-cells_per_emitter // 2, -cells_per_emitter // 2), (0, 1)
-            )
+        # if self.checkerboard:
+        #     dists = dists.roll(
+        #         (-cells_per_emitter // 2, -cells_per_emitter // 2), (0, 1)
+        #     )
 
-            dists[:: cells_per_emitter * 2, :] = dists[
-                :: cells_per_emitter * 2, :
-            ].roll(cells_per_emitter // 2, 1)
+        #     dists[:: cells_per_emitter * 2, :] = dists[
+        #         :: cells_per_emitter * 2, :
+        #     ].roll(cells_per_emitter // 2, 1)
 
-            dists = dists.roll((cells_per_emitter // 2, cells_per_emitter // 4), (0, 1))
+        #     dists = dists.roll((cells_per_emitter // 2, cells_per_emitter // 4), (0, 1))
 
         self.mask = dists <= self.emitter_size / 2
 
-    def init_point_transducer(self, ds: float):
+    def init_transducer(self, ds: float):
         # This creates a mask that will be used later when creating the complex plane
         # Made separately and saved to speed up execution a bit
+
+        if self.round_emitters:
+            self.init_round_transducer(ds)
+            return
+
+        # Else, initialize "point" emitters
 
         target_size = round(self.array_size / ds)
 
@@ -508,7 +532,7 @@ class Transducer:
 
         return transducer
 
-    def rounded_emitters(self, ds: float):
+    def to_rounded_emitters(self, ds: float):
         target_size = round(self.array_size / ds)
 
         assert target_size % self.emitters_num == 0, (
@@ -519,7 +543,9 @@ class Transducer:
 
         N = target_size // shape[-1]
 
-        complex_field = F.sigmoid(self.amps) * torch.exp(1j * (self.phases))
+        complex_field = F.sigmoid(self.amps) * torch.exp(
+            1j * (self.phases * 2 * torch.pi)
+        )
 
         complex_field = (
             complex_field.repeat_interleave(N, dim=1).repeat_interleave(N, dim=2)

@@ -117,10 +117,10 @@ def init_simulation(
 
     sim.create_propagators()
 
-    field_sample = sim.transducers[0].rounded_emitters(sim.ds)
+    field_sample = sim.transducers[0].to_rounded_emitters(sim.ds)
 
-    # plt.imshow(field_sample.abs()[0, :, :].cpu().detach().numpy())
-    # plt.show()
+    plt.imshow(field_sample.abs()[0, :, :].cpu().detach().numpy())
+    plt.show()
 
     return sim
 
@@ -237,14 +237,17 @@ def main():
     sample4 = torch.tensor(np.asarray(image4)[:, :], device="cuda")
     sample4 = sample4 / sample4.max()
 
-    samples = [sample1, sample2, sample3]
+    samples = [
+        sample1,
+        sample2,
+        sample3,
+    ]
 
     # ---- Array amount optim ----
 
     ITERS = 1500
-    viewer = napari.Viewer()
 
-    for num_arrays in range(3, 4):
+    for num_arrays in range(1, 2):
         sim = init_simulation(
             fr=40e3,
             c=343.0,
@@ -254,20 +257,20 @@ def main():
             num_arrays=num_arrays,
             pos_z=-0.11,
             random_init=True,
-            checkerboard=True,
+            checkerboard=False,
         )
 
-        optimizer = torch.optim.Adam(sim.get_params(), 0.1)
+        optimizer = torch.optim.Adam(sim.get_params(), 0.01)
 
-        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
-            optimizer, ITERS, eta_min=0.001
-        )
-
-        # scheduler = torch.optim.lr_scheduler.OneCycleLR(
-        #     optimizer, max_lr=0.1, total_steps=ITERS
+        # scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+        #     optimizer, ITERS, eta_min=0.001
         # )
 
-        scheduler = None
+        scheduler = torch.optim.lr_scheduler.OneCycleLR(
+            optimizer,
+            max_lr=0.01,
+            total_steps=ITERS,
+        )
 
         losses = optimize_slices(
             sim=sim,
@@ -276,10 +279,12 @@ def main():
             loss_func=cosine_similarity,
             scheduler=scheduler,
             iters=ITERS,
+            use_mean=True,
         )
 
-        field = sim.calculate_volume()
+        field = sim.calculate_volume(use_mean=True)
 
+        viewer = napari.Viewer()
         viewer.add_image(
             torch.abs(field).rot90(-0, (0, 1)).cpu().detach().numpy(),
             name=f"{num_arrays}",
