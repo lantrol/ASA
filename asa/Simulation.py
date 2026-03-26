@@ -415,7 +415,7 @@ class Transducer:
             )
 
             with torch.no_grad():
-                self.amps *= 4
+                self.amps *= 5
 
     def init_round_transducer(self, ds: float):
         # This creates a mask that will be used later when creating the complex plane
@@ -543,9 +543,7 @@ class Transducer:
 
         N = target_size // shape[-1]
 
-        complex_field = F.sigmoid(self.amps) * torch.exp(
-            1j * (self.phases * 2 * torch.pi)
-        )
+        complex_field = F.sigmoid(self.amps) * torch.exp(1j * (self.phases))
 
         complex_field = (
             complex_field.repeat_interleave(N, dim=1).repeat_interleave(N, dim=2)

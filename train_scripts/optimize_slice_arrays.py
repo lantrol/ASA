@@ -47,26 +47,39 @@ def init_simulation(
     device="cuda",
     random_init=True,
     checkerboard=False,
+    optimize_amps=True,
 ):
-    ds = 0.16 / sim_dim
+    ds = 0.165 / sim_dim
 
-    sim = Simulation(fr, c, size=0.16, ds=ds, device=device)
-    print(sim.dim)
-
-    sim.add_transducer(
-        Transducer(
-            emitters_num=num_emitters,
-            array_size=0.16,
-            emitter_size=ds,
-            apperture=0.01,
-            pos=[pos_z, 0, 0],
-            orientation=Orientation.Z,
-            t_mux=t_mux,
-            device=device,
-            random_init=random_init,
-            checkerboard=checkerboard,
-        )
+    sim = Simulation(
+        fr, c, size=0.165, ds=ds, device=device, optimize_amps=optimize_amps
     )
+
+    transducer = Transducer(
+        emitters_num=num_emitters,
+        array_size=0.165,
+        emitter_size=ds,
+        apperture=0.01,
+        pos=[pos_z, 0, 0],
+        orientation=Orientation.Z,
+        t_mux=t_mux,
+        device=device,
+        random_init=random_init,
+        checkerboard=checkerboard,
+    )
+
+    if not optimize_amps:
+        transducer.amps = torch.ones(
+            (t_mux, num_emitters, num_emitters),
+            dtype=torch.float32,
+            requires_grad=True,
+            device=device,
+        )
+
+        with torch.no_grad():
+            transducer.amps *= 5
+
+    sim.add_transducer(transducer)
 
     if num_arrays > 1:
         sim.add_transducer(
@@ -221,9 +234,9 @@ def loss_slice(field, slice, loss_func, layer):
 
 
 def main():
-    image = Image.open("./samples/birb.png").convert("L")
-    sample = torch.tensor(np.asarray(image)[:, :], device="cuda")
-    sample1 = sample / sample.max()
+    image1 = Image.open("./samples/birb_small.png").convert("L")
+    sample1 = torch.tensor(np.asarray(image1)[:, :], device="cuda")
+    sample1 = sample1 / sample1.max()
 
     image2 = Image.open("./samples/smiley.png").convert("L")
     sample2 = torch.tensor(np.asarray(image2)[::2, ::2], device="cuda")
@@ -240,24 +253,27 @@ def main():
     samples = [
         sample1,
         sample2,
-        sample3,
+        # sample3,
     ]
 
     # ---- Array amount optim ----
 
     ITERS = 1500
 
-    for num_arrays in range(1, 2):
+    arrays = [1]
+
+    for num_arrays in arrays:
         sim = init_simulation(
             fr=40e3,
             c=343.0,
             sim_dim=64,
-            t_mux=16,
+            t_mux=4,
             num_emitters=16,
             num_arrays=num_arrays,
-            pos_z=-0.11,
+            pos_z=-0.08,
             random_init=True,
             checkerboard=False,
+            optimize_amps=False,
         )
 
         optimizer = torch.optim.Adam(sim.get_params(), 0.01)
@@ -289,6 +305,16 @@ def main():
             torch.abs(field).rot90(-0, (0, 1)).cpu().detach().numpy(),
             name=f"{num_arrays}",
         )
+
+        phases = sim.transducers[0].phases
+        phases = phases.reshape(4, 16 * 16)
+        np.savetxt(
+            f"emitter_vals/dual_slice_phases.txt",
+            phases.cpu().detach().numpy(),
+        )
+
+        # amps = sim.transducers[0].amps
+        # print(amps.min(), amps.max())
 
         if LOG_TRAIN:
             print(f"With {num_arrays} arrays -> {losses[-1]}")
