@@ -3,3 +3,7 @@ from .Simulation import (
     Simulation,
     Transducer,
 )
+from .Simulation_Batch import (
+    Simulation_Batch,
+    Transducer_Batch,
+)

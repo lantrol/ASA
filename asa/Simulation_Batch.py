@@ -8,6 +8,8 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 
+from .Simulation import Orientation
+
 # WIP:
 # Trying to see if something similar to ASA Convolution can be used for bruteforce method
 
@@ -16,19 +18,8 @@ import torch.nn.functional as F
 # - This is kinda the standard of torch/numpy
 #
 
-# Attenuation in nP/m
-# [Conversion factor dB -> Np ] * dB/m
-# Termoviscoso αvt con β=0 (solo cortadura) -> 0.0118 Np/m ; 0.1 dB/m
-# Termoviscoso αvt con β=1 (convención del libro) -> 0.0235 Np/m ; 0.20 dB/m
-# Termoviscoso αvt con 4μ/3+μB (μB/μ≈0.6 μB/μ≈0.6 para aire, Tisza) -> 0.0227 Np/m ; 0.20 dB/m
-# Atmosférico αatm, 30% HR -> 0.173 Np/m ; 1.5 dB/m
-# Atmosférico αatm, 50% HR -> 0.150 Np/m ; 1.3 dB/m
-# Atmosférico αatm, 70% HR -> 0.127 Np/m ; 1.1 dB/m
 
-ATTENUATION = 1.0 / (20.0 / math.log(10)) * (1.3 + 0.2)
-
-
-class Simulation:
+class Simulation_Batch:
     def __init__(
         self,
         fr,
@@ -50,7 +41,7 @@ class Simulation:
         self.optimize_amps = optimize_amps
 
         self.transducers: list[
-            Transducer
+            Transducer_Batch
         ] = []  # Array of num_emitter x num_emitter phases
         self.propagators: list[torch.Tensor] = []  # Propagator matrix
         self.slices: list[torch.Tensor] = []  # Propagator slices
@@ -143,9 +134,7 @@ class Simulation:
 
         directivity = torch.sinc(dum / torch.pi)
 
-        propagator = (directivity / (dist + 1e-9)) * torch.exp(
-            1j * (self.k * dist) - ATTENUATION * dist
-        )
+        propagator = (directivity / (dist + 1e-9)) * torch.exp(1j * (self.k * dist))
 
         self.propagators.append(propagator)
 
@@ -217,7 +206,7 @@ class Simulation:
 
         propagator = (directivity / (dist + 1e-9)) * torch.exp(1j * (self.k * dist))
 
-        self.slices.append(propagator)
+        self.slices.append(propagator.unsqueeze(0))  # New dim for batch
 
     def calculate_volume(self, use_mean: bool = False):
         # For now assume there is only one for testing :P
@@ -282,44 +271,42 @@ class Simulation:
             device=self.device,
         )
 
-        for idx, transducer in enumerate(self.transducers):
-            emitter = transducer.to_rounded_emitters(self.ds)
+        transducer = self.transducers[0]
+        emitter = transducer.to_rounded_emitters(self.ds)
 
-            (x, y, z) = emitter.size()
-            emitter = emitter.reshape(x, 1, y, z)
+        (B, x, y, z) = emitter.size()
+        emitter = emitter.reshape(B, x, 1, y, z)
 
-            slice = self.slices[0]
+        slice = self.slices[0]
 
-            ini_idx = round(float(-transducer.pos[0] - self.min_dist) / self.ds)
-            slice = slice[ini_idx : ini_idx + self.dim, :, :]
+        # TEST: Only pad emitter, slice comes in needed size
+        padded_emitter = F.pad(
+            emitter, (self.dim // 2, self.dim // 2, self.dim // 2, self.dim // 2)
+        )
 
-            # TEST: Only pad emitter, slice comes in needed size
-            padded_emitter = F.pad(
-                emitter, (self.dim // 2, self.dim // 2, self.dim // 2, self.dim // 2)
-            )
+        fft_emitter = torch.fft.fft2(torch.fft.ifftshift(padded_emitter))
+        fft_prop = torch.fft.fft2(torch.fft.ifftshift(slice))
 
-            fft_emitter = torch.fft.fft2(torch.fft.ifftshift(padded_emitter))
-            fft_prop = torch.fft.fft2(torch.fft.ifftshift(slice))
+        convolved = fft_emitter * fft_prop
 
-            convolved = fft_emitter * fft_prop
+        field = torch.fft.fftshift(torch.fft.ifft2(convolved))
 
-            field = torch.fft.fftshift(torch.fft.ifft2(convolved))
+        # Trim the field
+        extra = field.size()[-1] - self.dim
+        field = field[
+            :,
+            :,
+            :,
+            extra // 2 : extra // 2 + self.dim,
+            extra // 2 : extra // 2 + self.dim,
+        ]
 
-            # Trim the field
-            extra = field.size()[-1] - self.dim
-            field = field[
-                :,
-                :,
-                extra // 2 : extra // 2 + self.dim,
-                extra // 2 : extra // 2 + self.dim,
-            ]
-
-            volume += field
+        # volume += field
 
         if use_mean:
-            return volume.abs().pow(2).sum(dim=0) / volume.shape[0]
+            return field.abs().pow(2).sum(dim=1) / field.shape[1]
 
-        return (volume.abs().pow(2) / volume.shape[0]).sum(dim=0).sqrt()
+        return (field.abs().pow(2) / field.shape[1]).sum(dim=1).sqrt()
 
     def calculate_volume_brute(self):
         # EXTREMELY WIP: Just to confirm equality between methods
@@ -429,14 +416,7 @@ class Simulation:
         return (1.0 / (dist + 1e-9)) * torch.exp(1j * (self.k * dist))
 
 
-class Orientation(Enum):
-    X = 1
-    Y = 2
-    Z = 3
-    Z_1 = 4
-
-
-class Transducer:
+class Transducer_Batch:
     def __init__(
         self,
         emitters_num: int,
@@ -548,57 +528,9 @@ class Transducer:
             with torch.no_grad():
                 self.amps *= 5
 
-    def init_round_transducer(self, ds: float):
-        # This creates a mask that will be used later when creating the complex plane
-        # Made separately and saved to speed up execution a bit
-
-        target_size = round(self.array_size / ds)
-
-        gap_between = self.array_size / self.phases.shape[-2]
-
-        dim_range_x = torch.arange(
-            0, target_size, dtype=torch.float32, device=self.device
-        ).view((1, -1))
-        dim_range_y = torch.arange(
-            0, target_size, dtype=torch.float32, device=self.device
-        ).view((-1, 1))
-
-        positions = torch.stack(
-            [
-                dim_range_x.expand((target_size, -1)),
-                dim_range_y.expand((-1, target_size)),
-            ],
-            dim=0,
-        )
-
-        cells_per_emitter = target_size // self.emitters_num
-
-        positions = ((positions * ds) % gap_between) - gap_between / 2
-        dists = torch.sqrt((positions**2).sum(dim=0))
-
-        plt.imshow(dists.abs().cpu().numpy())
-        plt.show(block=True)
-
-        # if self.checkerboard:
-        #     dists = dists.roll(
-        #         (-cells_per_emitter // 2, -cells_per_emitter // 2), (0, 1)
-        #     )
-
-        #     dists[:: cells_per_emitter * 2, :] = dists[
-        #         :: cells_per_emitter * 2, :
-        #     ].roll(cells_per_emitter // 2, 1)
-
-        #     dists = dists.roll((cells_per_emitter // 2, cells_per_emitter // 4), (0, 1))
-
-        self.mask = dists <= self.emitter_size / 2
-
     def init_transducer(self, ds: float):
         # This creates a mask that will be used later when creating the complex plane
         # Made separately and saved to speed up execution a bit
-
-        if self.round_emitters:
-            self.init_round_transducer(ds)
-            return
 
         # Else, initialize "point" emitters
 
@@ -628,40 +560,7 @@ class Transducer:
                 (cells_per_emitter // 2, cells_per_emitter // 4), (0, 1)
             )
 
-    def to_complex_plane(self, ds: float):
-        target_size = round(self.array_size / ds)
-
-        cells_per_emitter = int(np.round(self.emitter_size / ds))
-        n_y = self.phases.size(1)
-
-        gap_between = (target_size - cells_per_emitter * n_y) // n_y
-
-        # (t_mux, ny, nx)
-        field = self.amps * torch.exp(1j * self.phases)  # complex64
-
-        # Insert gaps using Kronecker trick
-        if gap_between > 0:
-            gap_kernel = torch.zeros(
-                (cells_per_emitter + gap_between, cells_per_emitter + gap_between),
-                dtype=torch.complex64,
-                device=self.device,
-            )
-            gap_kernel[:cells_per_emitter, :cells_per_emitter] = 1
-
-            field = torch.kron(field, gap_kernel)
-
-        # Center padding
-        pad_total = target_size - field.shape[-1]
-        pad_left = pad_total // 2
-        pad_right = pad_total - pad_left
-
-        transducer = F.pad(field, (pad_left, pad_right, pad_left, pad_right))
-
-        transducer = torch.roll(
-            transducer, (gap_between // 2, gap_between // 2), dims=(1, 2)
-        )
-
-        return transducer
+        self.mask = self.mask.unsqueeze(0)  # New dim for batch
 
     def to_rounded_emitters(self, ds: float):
         target_size = round(self.array_size / ds)
@@ -674,10 +573,10 @@ class Transducer:
 
         N = target_size // shape[-1]
 
-        complex_field = F.sigmoid(self.amps) * torch.exp(1j * (self.phases))
+        complex_field = 1 * torch.exp(1j * (self.phases))  # Assume amp == 1 for now
 
         complex_field = (
-            complex_field.repeat_interleave(N, dim=1).repeat_interleave(N, dim=2)
+            complex_field.repeat_interleave(N, dim=2).repeat_interleave(N, dim=3)
             * self.mask
         )
 
