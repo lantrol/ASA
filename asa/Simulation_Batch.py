@@ -19,6 +19,18 @@ from .Simulation import Orientation
 #
 
 
+# Attenuation in nP/m
+# [Conversion factor dB -> Np ] * dB/m
+# Termoviscoso αvt con β=0 (solo cortadura) -> 0.0118 Np/m ; 0.1 dB/m
+# Termoviscoso αvt con β=1 (convención del libro) -> 0.0235 Np/m ; 0.20 dB/m
+# Termoviscoso αvt con 4μ/3+μB (μB/μ≈0.6 μB/μ≈0.6 para aire, Tisza) -> 0.0227 Np/m ; 0.20 dB/m
+# Atmosférico αatm, 30% HR -> 0.173 Np/m ; 1.5 dB/m
+# Atmosférico αatm, 50% HR -> 0.150 Np/m ; 1.3 dB/m
+# Atmosférico αatm, 70% HR -> 0.127 Np/m ; 1.1 dB/m
+
+ATTENUATION = 1.0 / (20.0 / math.log(10)) * (1.3 + 0.2)
+
+
 class Simulation_Batch:
     def __init__(
         self,
@@ -134,7 +146,9 @@ class Simulation_Batch:
 
         directivity = torch.sinc(dum / torch.pi)
 
-        propagator = (directivity / (dist + 1e-9)) * torch.exp(1j * (self.k * dist))
+        propagator = (directivity / (dist + 1e-9)) * torch.exp(
+            1j * (self.k * dist) - ATTENUATION * dist
+        )
 
         self.propagators.append(propagator)
 
@@ -148,7 +162,6 @@ class Simulation_Batch:
             transducer.init_transducer(self.ds)
 
         # Now create the propagator
-        vertical_dim = math.ceil(float((self.max_dist - self.min_dist) / self.ds))
         propagator = torch.zeros(
             (1, self.dim * 2, self.dim * 2),
             dtype=torch.complex64,
@@ -204,7 +217,9 @@ class Simulation_Batch:
 
         directivity = torch.sinc(dum / torch.pi)
 
-        propagator = (directivity / (dist + 1e-9)) * torch.exp(1j * (self.k * dist))
+        propagator = (directivity / (dist + 1e-9)) * torch.exp(
+            1j * (self.k * dist) - ATTENUATION * dist
+        )
 
         self.slices.append(propagator.unsqueeze(0))  # New dim for batch
 

@@ -129,6 +129,8 @@ class Simulation:
         between = cell_pos + closest_tr_pos
         dist = torch.norm(between, dim=0)
 
+        print(dist.min(), dist.max())
+
         normal_vec = torch.tensor(
             [1.0, 0.0, 0.0], device=self.device, dtype=torch.float32
         ).reshape(3, 1, 1, 1)
@@ -159,7 +161,6 @@ class Simulation:
             transducer.init_transducer(self.ds)
 
         # Now create the propagator
-        vertical_dim = math.ceil(float((self.max_dist - self.min_dist) / self.ds))
         propagator = torch.zeros(
             (1, self.dim * 2, self.dim * 2),
             dtype=torch.complex64,
@@ -181,8 +182,8 @@ class Simulation:
         y_coords = y_coords.expand(1, -1, self.dim * 2)
         z_coords = (
             torch.zeros(1, dtype=torch.float32, device=self.device)
-            .view(-1, 1, 1)
-            .expand(-1, self.dim * 2, self.dim * 2)
+            .view(1, 1, 1)
+            .expand(1, self.dim * 2, self.dim * 2)
         ) + distance
 
         cell_pos = torch.stack(
@@ -197,9 +198,12 @@ class Simulation:
         closest_tr_pos = torch.tensor(
             [self.min_dist, 0, 0], dtype=torch.float32, device=self.device
         ).reshape(3, 1, 1, 1)
+        print(closest_tr_pos)
 
         between = cell_pos + closest_tr_pos
         dist = torch.norm(between, dim=0)
+
+        print(dist.min(), dist.max())
 
         normal_vec = torch.tensor(
             [1.0, 0.0, 0.0], device=self.device, dtype=torch.float32
@@ -215,7 +219,9 @@ class Simulation:
 
         directivity = torch.sinc(dum / torch.pi)
 
-        propagator = (directivity / (dist + 1e-9)) * torch.exp(1j * (self.k * dist))
+        propagator += (directivity / (dist + 1e-9)) * torch.exp(
+            1j * self.k * dist - ATTENUATION * dist
+        )
 
         self.slices.append(propagator)
 
@@ -497,10 +503,10 @@ class Transducer:
                 device=self.device,
             )
 
-        with torch.no_grad():
-            self.phases *= 2 * math.pi
-            self.amps *= 2
-            self.amps -= 1
+        # with torch.no_grad():
+        #     self.phases *= 2 * math.pi
+        #     self.amps *= 2
+        #     self.amps -= 1
 
         # Persistent info por complex plane calculation
         # Used to make calculations faster by saving information
@@ -590,7 +596,7 @@ class Transducer:
 
         #     dists = dists.roll((cells_per_emitter // 2, cells_per_emitter // 4), (0, 1))
 
-        self.mask = dists <= self.emitter_size / 2
+        self.mask = dists <= (self.emitter_size / 2)
 
     def init_transducer(self, ds: float):
         # This creates a mask that will be used later when creating the complex plane

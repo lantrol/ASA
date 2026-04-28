@@ -1,7 +1,7 @@
 import sys
 from pathlib import Path
 
-sys.path.append(str(Path(__file__).resolve().parents[1]))
+sys.path.append(str(Path(__file__).resolve().parents[2]))
 
 import json
 import os
@@ -25,24 +25,7 @@ torch.manual_seed(1)
 np.random.seed(2)
 random.seed(3)
 
-LOG_TRAIN = False
-
-
-def get_inverse_sqrt_schedule(optimizer, warmup_steps, last_epoch=-1):
-    def lr_lambda(step):
-        step = max(step, 1)
-
-        # Linear warmup
-        if step < warmup_steps:
-            return step / warmup_steps
-
-        # Inverse sqrt decay
-        return 1
-        # return (warmup_steps**0.5) / (step**0.5)
-
-    return torch.optim.lr_scheduler.LambdaLR(
-        optimizer, lr_lambda, last_epoch=last_epoch
-    )
+LOG_TRAIN = True
 
 
 class CosineLoss(nn.Module):
@@ -53,26 +36,6 @@ class CosineLoss(nn.Module):
         loss = 1 - torch.dot(pred.flatten(), target.flatten()).sum() ** 2 / (
             (pred**2).sum() * (target**2).sum() + 1e-8
         )
-        return loss
-
-
-class ScaleInvariantMSELoss(nn.Module):
-    def __init__(self, eps=1e-8):
-        super().__init__()
-        self.eps = eps
-
-    def forward(self, pred, target):
-        pred_flat = pred.flatten()
-        target_flat = target.flatten()
-
-        # optimal scaling factor
-        alpha = torch.dot(pred_flat, target_flat) / (
-            torch.dot(pred_flat, pred_flat) + self.eps
-        )
-
-        pred_scaled = alpha * pred_flat
-
-        loss = ((pred_scaled - target_flat) ** 2).mean()
         return loss
 
 
@@ -124,11 +87,9 @@ def train(
 
     # Optimizer
     optimizer = Adam(model.parameters(), lr=lr)  # weight_decay=1e-4
-    # scheduler = torch.optim.lr_scheduler.OneCycleLR(
-    #     optimizer, max_lr=lr, steps_per_epoch=50, epochs=epochs, final_div_factor=10
-    # )
-
-    scheduler = get_inverse_sqrt_schedule(optimizer, 20 * len(train_loader))
+    scheduler = torch.optim.lr_scheduler.OneCycleLR(
+        optimizer, max_lr=lr, steps_per_epoch=len(train_loader), epochs=epochs
+    )
 
     train_losses = []
     val_losses = []
@@ -146,9 +107,9 @@ def train(
         for i, (inputs, targets) in enumerate(train_loader):
             # p_rand = torch.rand(1)
 
-            # if p_rand > 1 - (epoch / epochs) * 0.3 and True:
+            # if p_rand > 1 - (epoch / epochs) * 0.3:
             #     inputs = inputs.to(device)
-            # # targets = targets.to(device)
+            # targets = targets.to(device)
 
             # else:
             #     img_dim = random.choice([16, 24, 32])
@@ -165,7 +126,6 @@ def train(
             #             mode="bilinear",  # , align_corners=False
             #         )
 
-            #     # threshold = random.random()
             #     inputs[inputs > 0.5] = 1
             #     inputs[inputs < 0.5] = 0
 
@@ -176,29 +136,18 @@ def train(
             #         inputs[ini:fini, :, :, :][inputs[ini:fini] < 0.5] = 0
 
             # ---
-            rand_phases = (
-                torch.rand((batch_size, 4, 16, 16), dtype=torch.float32, device=device)
-                * 2
-                * torch.pi
-            )
-            with torch.no_grad():
-                sim.transducers[0].phases = rand_phases
-                inputs = sim.calculate_slices(use_mean=True).reshape(
-                    batch_size, 1, 64, 64
-                )
-                inputs = inputs / inputs.max()
+            # rand_phases = (
+            #     torch.rand((batch_size, 4, 16, 16), dtype=torch.float32, device=device)
+            #     * 2
+            #     * torch.pi
+            # )
+            # with torch.no_grad():
+            #     sim.transducers[0].phases = rand_phases
+            #     inputs = sim.calculate_slices(use_mean=True).reshape(
+            #         batch_size, 1, 64, 64
+            #     )
 
-            # threshold = random.random() * 0.6 + 0.2
-            threshold = (
-                torch.rand(inputs.shape[0], dtype=torch.float32, device=device).expand(
-                    inputs.shape
-                )
-                * 0.6
-                + 0.2
-            )
-            inputs[inputs > threshold] = 1
-            inputs[inputs < threshold] = 0
-
+            inputs = inputs.to(device)
             inputs_flat = inputs.view(inputs.size(0), -1)
 
             optimizer.zero_grad()
@@ -275,84 +224,13 @@ def train(
     plt.grid(True)
     plt.show()
 
-    print("Finished Training")
+    print(f"Finished Training: Best Val loss of {np.array(val_losses).min()}")
     return train_losses, val_losses
 
 
-def run_simulation_on_sample(model, image_path, device="cpu"):
-    print(f"Running simulation on specific image: {image_path} using device: {device}")
-    model.eval()
-
-    # Simulation parameters (from test_load_bf.py)
-    t_mux = 4
-    fr = 40e3
-    c = 343.0
-    sim_dim = 64
-    ds = 0.16 / sim_dim
-
-    image = Image.open(image_path).convert("L")  # Ensure single channel
-    image_tensor = torch.from_numpy(np.array(image)).float() / 255.0
-    image_tensor = image_tensor / image_tensor.max()
-    image_tensor = image_tensor.unsqueeze(0).unsqueeze(0).to(device)  # [1, 1, 64, 64]
-
-    # Predict phases
-    with torch.no_grad():
-        input_flat = image_tensor.view(1, -1)
-        predicted_output = model(input_flat)
-        # Reshape to (4, 16, 16, ) to separate sine and cosine components
-        vec_output = predicted_output.view(4, 16, 16, 2).to(device)
-
-        # Reconstruct phases using atan2(sin, cos)
-        sin_comp = vec_output[:, :, :, 0]
-        cos_comp = vec_output[:, :, :, 1]
-        phases = torch.atan2(sin_comp, cos_comp)
-
-    print(f"Input image: {image_path}")
-    print(f"Reconstructed phases shape: {phases.shape}")
-
-    # Simulation setup
-    sim = Simulation_Batch(fr, c, size=0.16, ds=ds, device=device)
-
-    # We'll just setup one Transducer (Z) as in the test script
-    Z = Transducer_Batch(
-        emitters_num=16,
-        array_size=0.16,
-        emitter_size=ds,
-        apperture=0.01,
-        pos=[-0.08, 0, 0],
-        orientation=Orientation.Z,
-        t_mux=t_mux,
-        device=device,
-        random_init=False,
-    )
-
-    with torch.no_grad():
-        Z.phases = phases
-
-    sim.add_transducer(Z)
-    sim.create_propagators()
-    field = sim.calculate_volume(use_mean=True)
-
-    print("Simulation complete. Field calculated.")
-    return field
-
-
 # Moved import here for easier modifying
-
-#
-# from predictive_model_pinn.models.model_refiner import RefinerSinCosModel as PredModel
-
-# from predictive_model_pinn.models.model_attn import SinCosAttentionModel as PredModel
-
-# from predictive_model_pinn.models.model_unet import ConvModel as PredModel
-
-from predictive_model_pinn.models.model_sin_cos import SinCosModel as PredModel
-
-# from predictive_model_pinn.models.model_resid import ResidModel as PredModel
-
-# from predictive_model_pinn.models.model_multi import MultiModel as PredModel
-
-# from predictive_model_pinn.models.model_deep import DeeperModel as PredModel
+from predictive_model_pinn.models.model_phase import PhaseModel
+from predictive_model_pinn.models.model_sin_cos import SinCosModel
 
 if __name__ == "__main__":
     IMAGE_DIR = "data/emnist"
@@ -361,38 +239,43 @@ if __name__ == "__main__":
 
     lr = 0.0001
     criterion = CosineLoss()
-    model = PredModel()
 
-    total_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
-    print(f"Total number of parameters: {total_params}")
+    models = [PhaseModel, SinCosModel]
 
-    # 1. Train
-    train_loss, val_loss = train(
-        model,
-        IMAGE_DIR,
-        LABEL_DIR,
-        epochs=250,
-        batch_size=64,
-        device=DEVICE,
-        lr=lr,
-        criterion=criterion,
-        val_split=0.2,
-    )
+    for model_type in models:
+        model = model_type()
 
-    # Save the model
-    model_path = "trained_model_pinn_rand.pth"
-    torch.save(model.state_dict(), model_path)
-    print(f"Model saved to {model_path}")
+        # 1. Train
+        train_loss, val_loss = train(
+            model,
+            IMAGE_DIR,
+            LABEL_DIR,
+            epochs=25,
+            batch_size=64,
+            device=DEVICE,
+            lr=lr,
+            criterion=criterion,
+            val_split=0.2,
+        )
 
-    if LOG_TRAIN:
-        info = {
-            "base_lr": lr,
-            "loss_function": criterion.__name__,
-            "train_loss": train_loss,
-            "val_loss": val_loss,
-        }
+        # Save the model
+        model_path = "trained_model_pinn_rand.pth"
+        torch.save(model.state_dict(), model_path)
+        print(f"Model saved to {model_path}")
 
-        utc_time = datetime.now(timezone.utc)
+        if LOG_TRAIN:
+            utc_time = datetime.now(timezone.utc)
+            info = {
+                "base_lr": lr,
+                "model": model.__class__.__name__,
+                "loss_function": criterion.__class__.__name__,
+                "train_loss": train_loss,
+                "val_loss": val_loss,
+                "date": str(utc_time),
+            }
 
-        with open(f"train_runs/noise_trained_{utc_time}.json", "w") as json_file:
-            json.dump(info, json_file, indent=4)
+            with open(
+                f"{Path(__file__).resolve().parents[0]}/{model.__class__.__name__}.json",
+                "w",
+            ) as json_file:
+                json.dump(info, json_file, indent=4)

@@ -37,8 +37,7 @@ def get_inverse_sqrt_schedule(optimizer, warmup_steps, last_epoch=-1):
             return step / warmup_steps
 
         # Inverse sqrt decay
-        return 1
-        # return (warmup_steps**0.5) / (step**0.5)
+        return (warmup_steps**0.5) / (step**0.5)
 
     return torch.optim.lr_scheduler.LambdaLR(
         optimizer, lr_lambda, last_epoch=last_epoch
@@ -123,11 +122,7 @@ def train(
     sim.create_propagator_slices(0.08)
 
     # Optimizer
-    optimizer = Adam(model.parameters(), lr=lr)  # weight_decay=1e-4
-    # scheduler = torch.optim.lr_scheduler.OneCycleLR(
-    #     optimizer, max_lr=lr, steps_per_epoch=50, epochs=epochs, final_div_factor=10
-    # )
-
+    optimizer = Adam(model.parameters(), lr=lr)
     scheduler = get_inverse_sqrt_schedule(optimizer, 20 * len(train_loader))
 
     train_losses = []
@@ -144,38 +139,9 @@ def train(
         running_train_loss = 0.0
 
         for i, (inputs, targets) in enumerate(train_loader):
-            # p_rand = torch.rand(1)
+            # inputs = inputs.to(device)
+            # targets = targets.to(device)
 
-            # if p_rand > 1 - (epoch / epochs) * 0.3 and True:
-            #     inputs = inputs.to(device)
-            # # targets = targets.to(device)
-
-            # else:
-            #     img_dim = random.choice([16, 24, 32])
-            #     inputs = torch.rand(
-            #         (batch_size, 1, img_dim, img_dim),
-            #         dtype=torch.float32,
-            #         device=device,
-            #     )
-
-            #     if img_dim != 64:
-            #         inputs = F.interpolate(
-            #             inputs,
-            #             size=(64, 64),
-            #             mode="bilinear",  # , align_corners=False
-            #         )
-
-            #     # threshold = random.random()
-            #     inputs[inputs > 0.5] = 1
-            #     inputs[inputs < 0.5] = 0
-
-            # for j in range(4):
-            #     if random.random() > 0.5:
-            #         ini, fini = batch_size // 4 * j, batch_size // 4 * (j + 1)
-            #         inputs[ini:fini, :, :, :][inputs[ini:fini] > 0.5] = 1
-            #         inputs[ini:fini, :, :, :][inputs[ini:fini] < 0.5] = 0
-
-            # ---
             rand_phases = (
                 torch.rand((batch_size, 4, 16, 16), dtype=torch.float32, device=device)
                 * 2
@@ -188,7 +154,6 @@ def train(
                 )
                 inputs = inputs / inputs.max()
 
-            # threshold = random.random() * 0.6 + 0.2
             threshold = (
                 torch.rand(inputs.shape[0], dtype=torch.float32, device=device).expand(
                     inputs.shape
@@ -199,10 +164,14 @@ def train(
             inputs[inputs > threshold] = 1
             inputs[inputs < threshold] = 0
 
-            inputs_flat = inputs.view(inputs.size(0), -1)
+            # VAE hyperparams
+            beta = 0.01  # KL weight
+            recon_weight = 0.0  # Reconstruction weight
 
             optimizer.zero_grad()
-            phases = model(inputs_flat)
+
+            # New forward call for training
+            phases, mu, logvar = model(inputs, training=True)
 
             with torch.no_grad():
                 sim.transducers[0].phases = phases
@@ -211,7 +180,18 @@ def train(
                 inputs.size(0), 1, 64, 64
             )
 
-            loss = criterion(fields, inputs)
+            # 1. Simulation Loss (End-to-End)
+            loss_sim = criterion(fields, inputs)
+
+            # 2. VAE Reconstruction Loss
+            # loss_recon = F.mse_loss(reconstruction, inputs)
+
+            # 3. VAE KL Divergence Loss
+            loss_kl = -0.5 * torch.mean(1 + logvar - mu.pow(2) - logvar.exp())
+
+            # Total Loss
+            loss = loss_sim + (beta * loss_kl)
+
             loss.backward()
             optimizer.step()
             scheduler.step()
@@ -230,9 +210,8 @@ def train(
                     inputs = inputs.to(device)
                     targets = targets.to(device)
 
-                    inputs_flat = inputs.view(inputs.size(0), -1)
-
-                    phases = model(inputs_flat)
+                    # Use the non-training forward call
+                    phases = model(inputs, training=False)
 
                     with torch.no_grad():
                         sim.transducers[0].phases = phases
@@ -253,7 +232,6 @@ def train(
             if avg_val_loss < best_val_loss:
                 best_val_loss = avg_val_loss
                 counter = 0
-                # Optionally save the model here
                 torch.save(model.state_dict(), "best_model_pinn_rand.pth")
             else:
                 counter += 1
@@ -273,7 +251,7 @@ def train(
     plt.ylabel("Loss")
     plt.legend()
     plt.grid(True)
-    plt.show()
+    plt.savefig("transformernr.png")
 
     print("Finished Training")
     return train_losses, val_losses
@@ -297,15 +275,8 @@ def run_simulation_on_sample(model, image_path, device="cpu"):
 
     # Predict phases
     with torch.no_grad():
-        input_flat = image_tensor.view(1, -1)
-        predicted_output = model(input_flat)
-        # Reshape to (4, 16, 16, ) to separate sine and cosine components
-        vec_output = predicted_output.view(4, 16, 16, 2).to(device)
-
-        # Reconstruct phases using atan2(sin, cos)
-        sin_comp = vec_output[:, :, :, 0]
-        cos_comp = vec_output[:, :, :, 1]
-        phases = torch.atan2(sin_comp, cos_comp)
+        # Use the non-training forward call
+        phases = model(image_tensor, training=False)
 
     print(f"Input image: {image_path}")
     print(f"Reconstructed phases shape: {phases.shape}")
@@ -337,34 +308,16 @@ def run_simulation_on_sample(model, image_path, device="cpu"):
     return field
 
 
-# Moved import here for easier modifying
-
-#
-# from predictive_model_pinn.models.model_refiner import RefinerSinCosModel as PredModel
-
-# from predictive_model_pinn.models.model_attn import SinCosAttentionModel as PredModel
-
-# from predictive_model_pinn.models.model_unet import ConvModel as PredModel
-
-from predictive_model_pinn.models.model_sin_cos import SinCosModel as PredModel
-
-# from predictive_model_pinn.models.model_resid import ResidModel as PredModel
-
-# from predictive_model_pinn.models.model_multi import MultiModel as PredModel
-
-# from predictive_model_pinn.models.model_deep import DeeperModel as PredModel
+from predictive_model_pinn.models.model_vae_v3 import PatchVAETransformer as PredModel
 
 if __name__ == "__main__":
     IMAGE_DIR = "data/emnist"
     LABEL_DIR = "data/emnist_phases"
     DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
-    lr = 0.0001
+    lr = 0.001
     criterion = CosineLoss()
     model = PredModel()
-
-    total_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
-    print(f"Total number of parameters: {total_params}")
 
     # 1. Train
     train_loss, val_loss = train(
