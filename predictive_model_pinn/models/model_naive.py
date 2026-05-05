@@ -3,7 +3,7 @@ from torch import nn
 from torch.nn import functional as F
 
 
-class SinCosModel(nn.Module):
+class NaiveModel(nn.Module):
     def __init__(
         self, input_dim=64 * 64, output_dim=16 * 16 * 4, hidden_dim=2048
     ) -> None:
@@ -28,9 +28,3 @@ class SinCosModel(nn.Module):
         sin, cos = torch.chunk(out_reshaped, 2, dim=-1)
         phases = torch.atan2(sin, cos)
         return phases
-
-    # def sample(self, x) -> torch.Tensor:
-    #     mu, std = self.forward(x)
-    #     print(mu, std)
-    #     eps = torch.randn_like(std)
-    #     return mu + eps * std

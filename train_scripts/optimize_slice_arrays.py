@@ -49,15 +49,15 @@ def init_simulation(
     checkerboard=False,
     optimize_amps=True,
 ):
-    ds = 0.165 / sim_dim
+    ds = 0.16 / sim_dim
 
     sim = Simulation(
-        fr, c, size=0.165, ds=ds, device=device, optimize_amps=optimize_amps
+        fr, c, size=0.16, ds=ds, device=device, optimize_amps=optimize_amps
     )
 
     transducer = Transducer(
         emitters_num=num_emitters,
-        array_size=0.165,
+        array_size=0.16,
         emitter_size=ds,
         apperture=0.01,
         pos=[pos_z, 0, 0],
@@ -81,37 +81,6 @@ def init_simulation(
 
     sim.add_transducer(transducer)
 
-    if num_arrays > 1:
-        sim.add_transducer(
-            Transducer(
-                emitters_num=num_emitters,
-                array_size=0.16,
-                emitter_size=ds,
-                apperture=0.01,
-                pos=[pos_z, 0, 0],
-                orientation=Orientation.Y,
-                t_mux=t_mux,
-                device=device,
-                random_init=random_init,
-                checkerboard=checkerboard,
-            )
-        )
-    if num_arrays > 2:
-        sim.add_transducer(
-            Transducer(
-                emitters_num=num_emitters,
-                array_size=0.16,
-                emitter_size=ds,
-                apperture=0.01,
-                pos=[pos_z, 0, 0],
-                orientation=Orientation.X,
-                t_mux=t_mux,
-                device=device,
-                random_init=random_init,
-                checkerboard=checkerboard,
-            )
-        )
-
     if num_arrays == -1:
         sim.add_transducer(
             Transducer(
@@ -128,11 +97,14 @@ def init_simulation(
             )
         )
 
-    sim.create_propagators()
+    sim.create_propagator_slices(0)
 
     field_sample = sim.transducers[0].to_rounded_emitters(sim.ds)
 
     plt.imshow(field_sample.abs()[0, :, :].cpu().detach().numpy())
+    plt.show()
+
+    plt.imshow(sim.slices[0].abs()[0, :, :].cpu().detach().numpy())
     plt.show()
 
     return sim
@@ -153,13 +125,9 @@ def optimize_slices(
     losses = []
     vals = []
     for k in (pbar := tqdm(range(iters))):
-        field = sim.calculate_volume(use_mean=use_mean)
+        field = sim.calculate_slices(use_mean=use_mean)
 
         loss = loss_slice(field, targets[0], loss_func, 0)
-        space = (sim.dim - 1) // max(len(targets) - 1, 1)
-        for i in range(len(targets) - 1):
-            idx = space * (i + 1)
-            loss += loss_slice(field, targets[i + 1], loss_func, idx)
 
         loss.backward()
 
@@ -251,14 +219,12 @@ def main():
     sample4 = sample4 / sample4.max()
 
     samples = [
-        sample1,
         sample2,
-        # sample3,
     ]
 
     # ---- Array amount optim ----
 
-    ITERS = 1500
+    ITERS = 400
 
     arrays = [1]
 
@@ -270,7 +236,7 @@ def main():
             t_mux=4,
             num_emitters=16,
             num_arrays=num_arrays,
-            pos_z=-0.08,
+            pos_z=-0.16,
             random_init=True,
             checkerboard=False,
             optimize_amps=False,
@@ -298,18 +264,18 @@ def main():
             use_mean=True,
         )
 
-        field = sim.calculate_volume(use_mean=True)
+        field = sim.calculate_slices(use_mean=True)
 
         viewer = napari.Viewer()
         viewer.add_image(
-            torch.abs(field).rot90(-0, (0, 1)).cpu().detach().numpy(),
+            torch.abs(field).cpu().detach().numpy(),
             name=f"{num_arrays}",
         )
 
         phases = sim.transducers[0].phases
         phases = phases.reshape(4, 16 * 16)
         np.savetxt(
-            f"emitter_vals/dual_slice_phases.txt",
+            f"emitter_vals/drawing_phases_attenuation.txt",
             phases.cpu().detach().numpy(),
         )
 

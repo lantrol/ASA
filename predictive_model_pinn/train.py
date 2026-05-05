@@ -237,7 +237,7 @@ def run_simulation_on_sample(model, image_path, device="cpu"):
 
 if __name__ == "__main__":
     IMAGE_DIR = "data/emnist"
-    LABEL_DIR = "data/emnist_phases"
+    LABEL_DIR = "data/val_images"
     DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
     # 1. Train

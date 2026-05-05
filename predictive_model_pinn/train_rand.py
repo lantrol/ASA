@@ -37,8 +37,7 @@ def get_inverse_sqrt_schedule(optimizer, warmup_steps, last_epoch=-1):
             return step / warmup_steps
 
         # Inverse sqrt decay
-        return 1
-        # return (warmup_steps**0.5) / (step**0.5)
+        return (warmup_steps**0.5) / (step**0.5)
 
     return torch.optim.lr_scheduler.LambdaLR(
         optimizer, lr_lambda, last_epoch=last_epoch
@@ -137,16 +136,16 @@ def train(
     patience = 20
     counter = 0
     best_val_loss = float("inf")
+    model.train()
 
     for epoch in range(epochs):
         # Training phase
-        model.train()
         running_train_loss = 0.0
 
-        for i, (inputs, targets) in enumerate(train_loader):
+        for i, inputs in enumerate(train_loader):
             # p_rand = torch.rand(1)
 
-            # if p_rand > 1 - (epoch / epochs) * 0.3 and True:
+            # if p_rand > 1 - (epoch / epochs) * 0.3 and False:
             #     inputs = inputs.to(device)
             # # targets = targets.to(device)
 
@@ -165,9 +164,9 @@ def train(
             #             mode="bilinear",  # , align_corners=False
             #         )
 
-            #     # threshold = random.random()
-            #     inputs[inputs > 0.5] = 1
-            #     inputs[inputs < 0.5] = 0
+            # threshold = inputs.median(dim=0)[0].expand(inputs.shape)
+            # inputs[inputs > threshold] = 1
+            # inputs[inputs < threshold] = 0
 
             # for j in range(4):
             #     if random.random() > 0.5:
@@ -186,18 +185,21 @@ def train(
                 inputs = sim.calculate_slices(use_mean=True).reshape(
                     batch_size, 1, 64, 64
                 )
-                inputs = inputs / inputs.max()
+                inputs = (inputs - inputs.min()) / (inputs.max() - inputs.min())
 
-            # threshold = random.random() * 0.6 + 0.2
-            threshold = (
-                torch.rand(inputs.shape[0], dtype=torch.float32, device=device).expand(
-                    inputs.shape
+            if random.random() > 0.5:
+                inputs = 1 - inputs
+
+            if random.random() > 0.5:
+                threshold = (
+                    torch.rand(
+                        inputs.shape[0], dtype=torch.float32, device=device
+                    ).expand(inputs.shape)
+                    * 0.6
+                    + 0.2
                 )
-                * 0.6
-                + 0.2
-            )
-            inputs[inputs > threshold] = 1
-            inputs[inputs < threshold] = 0
+                inputs[inputs > threshold] = 1
+                inputs[inputs < threshold] = 0
 
             inputs_flat = inputs.view(inputs.size(0), -1)
 
@@ -226,9 +228,8 @@ def train(
             model.eval()
             running_val_loss = 0.0
             with torch.no_grad():
-                for i, (inputs, targets) in enumerate(val_loader):
+                for i, inputs in enumerate(val_loader):
                     inputs = inputs.to(device)
-                    targets = targets.to(device)
 
                     inputs_flat = inputs.view(inputs.size(0), -1)
 
@@ -356,7 +357,7 @@ from predictive_model_pinn.models.model_sin_cos import SinCosModel as PredModel
 
 if __name__ == "__main__":
     IMAGE_DIR = "data/emnist"
-    LABEL_DIR = "data/emnist_phases"
+    LABEL_DIR = "data/val_images"
     DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
     lr = 0.0001

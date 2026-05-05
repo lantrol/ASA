@@ -267,7 +267,7 @@ from predictive_model_pinn.models.model_sin_cos import SinCosModel
 
 if __name__ == "__main__":
     IMAGE_DIR = "data/emnist"
-    LABEL_DIR = "data/emnist_phases"
+    LABEL_DIR = "data/val_images"
     DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
     lr = 0.0001

@@ -25,7 +25,7 @@ torch.manual_seed(1)
 np.random.seed(2)
 random.seed(3)
 
-LOG_TRAIN = True
+LOG_TRAIN = False
 
 
 class CosineLoss(nn.Module):
@@ -104,7 +104,7 @@ def train(
         model.train()
         running_train_loss = 0.0
 
-        for i, (inputs, targets) in enumerate(train_loader):
+        for i, inputs in enumerate(train_loader):
             # p_rand = torch.rand(1)
 
             # if p_rand > 1 - (epoch / epochs) * 0.3:
@@ -175,9 +175,8 @@ def train(
             model.eval()
             running_val_loss = 0.0
             with torch.no_grad():
-                for i, (inputs, targets) in enumerate(val_loader):
+                for i, inputs in enumerate(val_loader):
                     inputs = inputs.to(device)
-                    targets = targets.to(device)
 
                     inputs_flat = inputs.view(inputs.size(0), -1)
 
@@ -234,7 +233,7 @@ from predictive_model_pinn.models.model_sin_cos import SinCosModel
 
 if __name__ == "__main__":
     IMAGE_DIR = "data/emnist"
-    LABEL_DIR = "data/emnist_phases"
+    LABEL_DIR = "data/val_images"
     DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
     lr = 0.0001
@@ -260,8 +259,8 @@ if __name__ == "__main__":
 
         # Save the model
         model_path = "trained_model_pinn_rand.pth"
-        torch.save(model.state_dict(), model_path)
-        print(f"Model saved to {model_path}")
+        # torch.save(model.state_dict(), model_path)
+        # print(f"Model saved to {model_path}")
 
         if LOG_TRAIN:
             utc_time = datetime.now(timezone.utc)
